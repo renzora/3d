@@ -218,7 +218,7 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `directional.rs` | Sunlight (parallel rays) | ✅ |
 | `point.rs` | Omni-directional light | ✅ |
 | `spot.rs` | Cone-shaped light | ✅ |
-| `hemisphere_light.rs` | Sky/ground gradient | |
+| `hemisphere_light.rs` | Sky/ground gradient | ✅ |
 | `rect_area_light.rs` | Area light (LTC) | |
 
 ### 5.2 Shadows (`src/shadows/`)

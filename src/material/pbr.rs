@@ -5,7 +5,7 @@ use crate::geometry::Vertex;
 use crate::math::Color;
 use bytemuck::{Pod, Zeroable};
 
-/// Camera uniform for PBR (includes position for specular).
+/// Camera uniform for PBR (includes position for specular and hemisphere light).
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PbrCameraUniform {
@@ -15,6 +15,22 @@ pub struct PbrCameraUniform {
     pub position: [f32; 3],
     /// Padding for alignment.
     pub _padding: f32,
+    /// Hemisphere light sky color (RGB) + enabled flag (W: 1.0 = enabled).
+    pub hemisphere_sky: [f32; 4],
+    /// Hemisphere light ground color (RGB) + intensity (W).
+    pub hemisphere_ground: [f32; 4],
+}
+
+impl Default for PbrCameraUniform {
+    fn default() -> Self {
+        Self {
+            view_proj: [[0.0; 4]; 4],
+            position: [0.0; 3],
+            _padding: 0.0,
+            hemisphere_sky: [0.6, 0.75, 1.0, 0.0],
+            hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
+        }
+    }
 }
 
 /// Model uniform data.

@@ -124,6 +124,11 @@ pub struct RenApp {
     color_correction: ColorCorrectionPass,
     aa_mode: AaMode,
     surface_format: wgpu::TextureFormat,
+    // Hemisphere light state
+    hemisphere_enabled: bool,
+    hemisphere_sky_color: [f32; 3],
+    hemisphere_ground_color: [f32; 3],
+    hemisphere_intensity: f32,
 }
 
 #[wasm_bindgen]
@@ -238,6 +243,8 @@ impl RenApp {
             view_proj: matrix4_to_array(camera.view_projection_matrix()),
             position: [camera_pos.x, camera_pos.y, camera_pos.z],
             _padding: 0.0,
+            hemisphere_sky: [0.6, 0.75, 1.0, 0.0],  // Disabled by default
+            hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
         };
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -477,6 +484,11 @@ impl RenApp {
             color_correction,
             aa_mode: AaMode::Fxaa,
             surface_format,
+            // Hemisphere light defaults
+            hemisphere_enabled: false,
+            hemisphere_sky_color: [0.6, 0.75, 1.0],
+            hemisphere_ground_color: [0.4, 0.3, 0.2],
+            hemisphere_intensity: 1.0,
         })
     }
 
@@ -563,6 +575,18 @@ impl RenApp {
                 view_proj,
                 position: [pos.x, pos.y, pos.z],
                 _padding: 0.0,
+                hemisphere_sky: [
+                    self.hemisphere_sky_color[0],
+                    self.hemisphere_sky_color[1],
+                    self.hemisphere_sky_color[2],
+                    if self.hemisphere_enabled { 1.0 } else { 0.0 },
+                ],
+                hemisphere_ground: [
+                    self.hemisphere_ground_color[0],
+                    self.hemisphere_ground_color[1],
+                    self.hemisphere_ground_color[2],
+                    self.hemisphere_intensity,
+                ],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
@@ -923,6 +947,18 @@ impl RenApp {
                 view_proj: matrix4_to_array(camera.view_projection_matrix()),
                 position: [pos.x, pos.y, pos.z],
                 _padding: 0.0,
+                hemisphere_sky: [
+                    self.hemisphere_sky_color[0],
+                    self.hemisphere_sky_color[1],
+                    self.hemisphere_sky_color[2],
+                    if self.hemisphere_enabled { 1.0 } else { 0.0 },
+                ],
+                hemisphere_ground: [
+                    self.hemisphere_ground_color[0],
+                    self.hemisphere_ground_color[1],
+                    self.hemisphere_ground_color[2],
+                    self.hemisphere_intensity,
+                ],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
         }
@@ -1596,6 +1632,44 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn reset_color_correction(&mut self) {
         self.color_correction.reset();
+    }
+
+    // ========== Hemisphere Light ==========
+
+    /// Enable or disable hemisphere light.
+    #[wasm_bindgen]
+    pub fn set_hemisphere_light_enabled(&mut self, enabled: bool) {
+        self.hemisphere_enabled = enabled;
+    }
+
+    /// Check if hemisphere light is enabled.
+    #[wasm_bindgen]
+    pub fn is_hemisphere_light_enabled(&self) -> bool {
+        self.hemisphere_enabled
+    }
+
+    /// Set hemisphere light sky color (RGB, 0.0-1.0).
+    #[wasm_bindgen]
+    pub fn set_hemisphere_sky_color(&mut self, r: f32, g: f32, b: f32) {
+        self.hemisphere_sky_color = [r, g, b];
+    }
+
+    /// Set hemisphere light ground color (RGB, 0.0-1.0).
+    #[wasm_bindgen]
+    pub fn set_hemisphere_ground_color(&mut self, r: f32, g: f32, b: f32) {
+        self.hemisphere_ground_color = [r, g, b];
+    }
+
+    /// Set hemisphere light intensity (0.0 to 2.0).
+    #[wasm_bindgen]
+    pub fn set_hemisphere_intensity(&mut self, intensity: f32) {
+        self.hemisphere_intensity = intensity.clamp(0.0, 2.0);
+    }
+
+    /// Get hemisphere light intensity.
+    #[wasm_bindgen]
+    pub fn get_hemisphere_intensity(&self) -> f32 {
+        self.hemisphere_intensity
     }
 
     /// Add demo shapes to showcase bloom effect.

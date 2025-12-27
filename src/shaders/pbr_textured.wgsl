@@ -1,11 +1,16 @@
-// PBR shader with texture support
-// Supports albedo, metallic-roughness, and normal maps
+// PBR shader with texture support and hemisphere lighting
+// Supports albedo, metallic-roughness, normal maps, and hemisphere light
 
 const PI: f32 = 3.14159265359;
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
+    _padding: f32,
+    // Hemisphere light: sky.rgb = sky color, sky.w = enabled (1.0 = on)
+    hemisphere_sky: vec4<f32>,
+    // Hemisphere light: ground.rgb = ground color, ground.w = intensity
+    hemisphere_ground: vec4<f32>,
 }
 
 struct ModelUniform {
@@ -119,6 +124,26 @@ fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f
     return ggx1 * ggx2;
 }
 
+// Calculate hemisphere light contribution based on world normal
+fn calculate_hemisphere_light(normal: vec3<f32>) -> vec3<f32> {
+    // Check if hemisphere light is enabled
+    if (camera.hemisphere_sky.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+
+    let sky_color = camera.hemisphere_sky.rgb;
+    let ground_color = camera.hemisphere_ground.rgb;
+    let intensity = camera.hemisphere_ground.w;
+
+    // Map normal.y from [-1, 1] to [0, 1] for blending
+    let blend = normal.y * 0.5 + 0.5;
+
+    // Interpolate between ground and sky color
+    let hemisphere_color = mix(ground_color, sky_color, blend);
+
+    return hemisphere_color * intensity;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample textures or use material values
@@ -177,8 +202,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
                           light3_pos, light3_color, light3_intensity);
 
-    // Ambient lighting (increased)
-    let ambient = vec3<f32>(0.08) * albedo * ao;
+    // Ambient lighting (flat ambient + hemisphere gradient)
+    let flat_ambient = vec3<f32>(0.08);
+    let hemisphere_ambient = calculate_hemisphere_light(n);
+    let ambient = (flat_ambient + hemisphere_ambient) * albedo * ao;
 
     var color = ambient + lo;
 

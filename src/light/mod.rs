@@ -2,11 +2,13 @@
 
 mod ambient;
 mod directional;
+mod hemisphere;
 mod point;
 mod spot;
 
 pub use ambient::AmbientLight;
 pub use directional::DirectionalLight;
+pub use hemisphere::HemisphereLight;
 pub use point::PointLight;
 pub use spot::SpotLight;
 
@@ -68,12 +70,35 @@ impl Default for LightUniform {
     }
 }
 
+/// GPU-friendly hemisphere light data.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct HemisphereLightUniform {
+    /// Sky color (RGB) + enabled flag (W: 1.0 = enabled).
+    pub sky: [f32; 4],
+    /// Ground color (RGB) + intensity (W).
+    pub ground: [f32; 4],
+}
+
+impl Default for HemisphereLightUniform {
+    fn default() -> Self {
+        Self {
+            sky: [0.6, 0.75, 1.0, 0.0],    // Light blue, disabled
+            ground: [0.4, 0.3, 0.2, 1.0],   // Brown, intensity 1.0
+        }
+    }
+}
+
 /// Lights uniform buffer containing all scene lights.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct LightsUniform {
     /// Ambient light color and intensity (RGB + intensity in alpha).
     pub ambient: [f32; 4],
+    /// Hemisphere light sky color (RGB) + enabled flag (W).
+    pub hemisphere_sky: [f32; 4],
+    /// Hemisphere light ground color (RGB) + intensity (W).
+    pub hemisphere_ground: [f32; 4],
     /// Number of active lights.
     pub num_lights: u32,
     /// Padding (using u32 to match WGSL alignment).
@@ -86,6 +111,8 @@ impl Default for LightsUniform {
     fn default() -> Self {
         Self {
             ambient: [0.03, 0.03, 0.03, 1.0],
+            hemisphere_sky: [0.6, 0.75, 1.0, 0.0],      // Disabled by default
+            hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
             num_lights: 0,
             _padding: [0; 3],
             lights: [LightUniform::default(); MAX_LIGHTS],
@@ -102,6 +129,27 @@ impl LightsUniform {
     /// Set ambient light.
     pub fn set_ambient(&mut self, color: Color, intensity: f32) {
         self.ambient = [color.r * intensity, color.g * intensity, color.b * intensity, intensity];
+    }
+
+    /// Set hemisphere light.
+    pub fn set_hemisphere(&mut self, sky_color: Color, ground_color: Color, intensity: f32, enabled: bool) {
+        self.hemisphere_sky = [
+            sky_color.r,
+            sky_color.g,
+            sky_color.b,
+            if enabled { 1.0 } else { 0.0 },
+        ];
+        self.hemisphere_ground = [
+            ground_color.r,
+            ground_color.g,
+            ground_color.b,
+            intensity,
+        ];
+    }
+
+    /// Enable or disable hemisphere light.
+    pub fn set_hemisphere_enabled(&mut self, enabled: bool) {
+        self.hemisphere_sky[3] = if enabled { 1.0 } else { 0.0 };
     }
 
     /// Add a light and return its index.

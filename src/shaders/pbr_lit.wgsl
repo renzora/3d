@@ -1,5 +1,6 @@
 // PBR shader with dynamic lighting support
 // Supports up to 16 dynamic lights (point, directional, spot)
+// Also supports hemisphere lighting for sky/ground gradient ambient
 
 const PI: f32 = 3.14159265359;
 const MAX_LIGHTS: u32 = 16u;
@@ -41,6 +42,10 @@ struct Light {
 
 struct LightsUniform {
     ambient: vec4<f32>,
+    // Hemisphere light: sky.rgb = sky color, sky.w = enabled (1.0 = on, 0.0 = off)
+    hemisphere_sky: vec4<f32>,
+    // Hemisphere light: ground.rgb = ground color, ground.w = intensity
+    hemisphere_ground: vec4<f32>,
     num_lights: u32,
     _pad0: u32,
     _pad1: u32,
@@ -136,6 +141,31 @@ fn calculate_spot_attenuation(light_dir: vec3<f32>, spot_dir: vec3<f32>, inner_c
     return clamp((cos_angle - outer_cos) / (inner_cos - outer_cos), 0.0, 1.0);
 }
 
+// Calculate hemisphere light contribution based on world normal
+// Surfaces facing up (normal.y = 1) get sky color
+// Surfaces facing down (normal.y = -1) get ground color
+// Horizontal surfaces get a blend
+fn calculate_hemisphere_light(normal: vec3<f32>) -> vec3<f32> {
+    // Check if hemisphere light is enabled
+    if (lights_data.hemisphere_sky.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+
+    let sky_color = lights_data.hemisphere_sky.rgb;
+    let ground_color = lights_data.hemisphere_ground.rgb;
+    let intensity = lights_data.hemisphere_ground.w;
+
+    // Map normal.y from [-1, 1] to [0, 1] for blending
+    // normal.y = 1 (facing up) -> blend = 1 (full sky)
+    // normal.y = -1 (facing down) -> blend = 0 (full ground)
+    let blend = normal.y * 0.5 + 0.5;
+
+    // Interpolate between ground and sky color
+    let hemisphere_color = mix(ground_color, sky_color, blend);
+
+    return hemisphere_color * intensity;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = material.base_color.rgb;
@@ -198,8 +228,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         lo += (kd * albedo / PI + specular) * radiance * n_dot_l;
     }
 
-    // Ambient lighting
-    let ambient = lights_data.ambient.rgb * albedo * ao;
+    // Ambient lighting (flat ambient + hemisphere gradient)
+    let flat_ambient = lights_data.ambient.rgb;
+    let hemisphere_ambient = calculate_hemisphere_light(n);
+    let ambient = (flat_ambient + hemisphere_ambient) * albedo * ao;
 
     var color = ambient + lo;
 
