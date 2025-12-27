@@ -330,6 +330,52 @@
                     <span class="value" id="hemisphere-intensity-val">1.0</span>
                 </label>
             </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Shadows</h3>
+                <label>
+                    <input type="checkbox" id="shadows-enabled" checked>
+                    Enable
+                </label>
+                <label>
+                    Resolution
+                    <select id="shadow-resolution">
+                        <option value="512">512</option>
+                        <option value="1024">1024</option>
+                        <option value="2048" selected>2048</option>
+                        <option value="4096">4096</option>
+                    </select>
+                </label>
+                <label>
+                    PCF Mode
+                    <select id="shadow-pcf">
+                        <option value="0">None</option>
+                        <option value="1">2x2</option>
+                        <option value="2" selected>3x3</option>
+                        <option value="3">5x5</option>
+                        <option value="4">Poisson</option>
+                    </select>
+                </label>
+                <label>
+                    Bias
+                    <input type="range" id="shadow-bias" min="0.001" max="0.02" step="0.001" value="0.005">
+                    <span class="value" id="shadow-bias-val">0.005</span>
+                </label>
+                <label>
+                    Normal Bias
+                    <input type="range" id="shadow-normal-bias" min="0" max="0.1" step="0.005" value="0.02">
+                    <span class="value" id="shadow-normal-bias-val">0.02</span>
+                </label>
+                <label>
+                    Cascades
+                    <select id="shadow-cascades">
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4" selected>4</option>
+                    </select>
+                </label>
+            </div>
         </div>
 
         <!-- Effects Tab -->
@@ -815,6 +861,30 @@
                     document.getElementById('vignette-roundness-val').textContent = val.toFixed(1);
                 });
 
+                // Shadow controls
+                document.getElementById('shadows-enabled').addEventListener('change', (e) => {
+                    if (app.set_shadows_enabled) app.set_shadows_enabled(e.target.checked);
+                });
+                document.getElementById('shadow-resolution').addEventListener('change', (e) => {
+                    if (app.set_shadow_resolution) app.set_shadow_resolution(parseInt(e.target.value));
+                });
+                document.getElementById('shadow-pcf').addEventListener('change', (e) => {
+                    if (app.set_shadow_pcf_mode) app.set_shadow_pcf_mode(parseInt(e.target.value));
+                });
+                document.getElementById('shadow-bias').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_shadow_bias) app.set_shadow_bias(val);
+                    document.getElementById('shadow-bias-val').textContent = val.toFixed(3);
+                });
+                document.getElementById('shadow-normal-bias').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_shadow_normal_bias) app.set_shadow_normal_bias(val);
+                    document.getElementById('shadow-normal-bias-val').textContent = val.toFixed(3);
+                });
+                document.getElementById('shadow-cascades').addEventListener('change', (e) => {
+                    if (app.set_shadow_cascades) app.set_shadow_cascades(parseInt(e.target.value));
+                });
+
                 // DoF controls
                 document.getElementById('dof-enabled').addEventListener('change', (e) => {
                     app.set_dof_enabled(e.target.checked);
@@ -987,6 +1057,12 @@
                     app.set_hemisphere_intensity(val);
                     document.getElementById('hemisphere-intensity-val').textContent = val.toFixed(1);
                 });
+
+                // Initialize shadow settings from default checkbox values
+                if (app.set_shadows_enabled) {
+                    const shadowsEnabled = document.getElementById('shadows-enabled').checked;
+                    app.set_shadows_enabled(shadowsEnabled);
+                }
 
             } catch (err) {
                 loadingEl.style.display = 'none';

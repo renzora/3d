@@ -1,5 +1,5 @@
-// PBR shader with texture support and hemisphere lighting
-// Supports albedo, metallic-roughness, normal maps, and hemisphere light
+// PBR shader with texture support, hemisphere lighting, and shadow mapping
+// Supports albedo, metallic-roughness, normal maps, hemisphere light, and directional shadows
 
 const PI: f32 = 3.14159265359;
 
@@ -11,6 +11,17 @@ struct CameraUniform {
     hemisphere_sky: vec4<f32>,
     // Hemisphere light: ground.rgb = ground color, ground.w = intensity
     hemisphere_ground: vec4<f32>,
+}
+
+struct ShadowUniform {
+    // Light-space matrix for shadow mapping
+    light_view_proj: mat4x4<f32>,
+    // Shadow settings: x=bias, y=normal_bias, z=enabled, w=pcf_mode
+    shadow_params: vec4<f32>,
+    // Light direction (for directional light)
+    light_direction: vec4<f32>,
+    // Shadow map size (x=width, y=height, z=1/width, w=1/height)
+    shadow_map_size: vec4<f32>,
 }
 
 struct ModelUniform {
@@ -50,6 +61,14 @@ var normal_sampler: sampler;
 var metallic_roughness_texture: texture_2d<f32>;
 @group(3) @binding(5)
 var metallic_roughness_sampler: sampler;
+
+// Shadow mapping (merged into group 3)
+@group(3) @binding(6)
+var<uniform> shadow: ShadowUniform;
+@group(3) @binding(7)
+var shadow_map: texture_depth_2d;
+@group(3) @binding(8)
+var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -144,6 +163,99 @@ fn calculate_hemisphere_light(normal: vec3<f32>) -> vec3<f32> {
     return hemisphere_color * intensity;
 }
 
+// Calculate shadow factor for a world position
+fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    // Transform to light space
+    let light_space_pos = shadow.light_view_proj * vec4<f32>(world_pos, 1.0);
+
+    // Perspective divide
+    let proj_coords_raw = light_space_pos.xyz / light_space_pos.w;
+
+    // Transform from [-1, 1] to [0, 1] for texture sampling
+    let proj_x = proj_coords_raw.x * 0.5 + 0.5;
+    let proj_y = proj_coords_raw.y * -0.5 + 0.5; // Flip Y for texture coordinates
+    let proj_z = proj_coords_raw.z;
+
+    let bias = shadow.shadow_params.x;
+    let normal_bias = shadow.shadow_params.y;
+
+    // Apply normal bias
+    let light_dir = normalize(shadow.light_direction.xyz);
+    let cos_angle = max(dot(normal, -light_dir), 0.0);
+    let slope_bias = bias + normal_bias * (1.0 - cos_angle);
+    let compare_depth = proj_z - slope_bias;
+
+    // Clamp UV to valid range for sampling
+    let uv = clamp(vec2<f32>(proj_x, proj_y), vec2<f32>(0.001), vec2<f32>(0.999));
+
+    // Sample shadow map with 3x3 PCF
+    let texel_size = shadow.shadow_map_size.zw;
+    var shadow_factor = 0.0;
+
+    // Unrolled 3x3 PCF for uniform control flow
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(-1.0, -1.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(0.0, -1.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(1.0, -1.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(-1.0, 0.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(0.0, 0.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(1.0, 0.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(-1.0, 1.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(0.0, 1.0) * texel_size, compare_depth);
+    shadow_factor += textureSampleCompare(shadow_map, shadow_sampler, uv + vec2<f32>(1.0, 1.0) * texel_size, compare_depth);
+    shadow_factor /= 9.0;
+
+    // Check bounds and shadows enabled - multiply result instead of early return
+    let in_bounds = step(0.0, proj_x) * step(proj_x, 1.0) * step(0.0, proj_y) * step(proj_y, 1.0) * step(0.0, proj_z) * step(proj_z, 1.0);
+    let shadows_on = step(0.5, shadow.shadow_params.z);
+
+    // If out of bounds or shadows disabled, return 1.0 (no shadow)
+    return mix(1.0, shadow_factor, in_bounds * shadows_on);
+}
+
+// Calculate directional light with shadows
+fn calculate_directional_light(
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    f0: vec3<f32>,
+    albedo: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+) -> vec3<f32> {
+    // Check if shadows are enabled (which means directional light is active)
+    if (shadow.shadow_params.z < 0.5) {
+        return vec3<f32>(0.0);
+    }
+
+    let light_dir = normalize(-shadow.light_direction.xyz);
+    let h = normalize(v + light_dir);
+
+    // Directional light has no attenuation
+    let light_color = vec3<f32>(1.0, 0.98, 0.95);
+    let light_intensity = 3.0;
+    let radiance = light_color * light_intensity;
+
+    // Cook-Torrance BRDF
+    let ndf = distribution_ggx(n, h, roughness);
+    let g = geometry_smith(n, v, light_dir, roughness);
+    let f = fresnel_schlick(max(dot(h, v), 0.0), f0);
+
+    let numerator = ndf * g * f;
+    let denominator = 4.0 * max(dot(n, v), 0.0) * max(dot(n, light_dir), 0.0) + 0.0001;
+    let specular = numerator / denominator;
+
+    let ks = f;
+    var kd = vec3<f32>(1.0) - ks;
+    kd *= 1.0 - metallic;
+
+    let n_dot_l = max(dot(n, light_dir), 0.0);
+
+    // Get shadow factor
+    let shadow_factor = calculate_shadow(world_pos, n);
+
+    return (kd * albedo / PI + specular) * radiance * n_dot_l * shadow_factor;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample textures or use material values
@@ -180,6 +292,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var lo = vec3<f32>(0.0);
+
+    // Directional light with shadows (sun)
+    lo += calculate_directional_light(in.world_position, n, v, f0, albedo, metallic, roughness);
 
     // Light 1 - Key light (stronger for HDR output)
     let light1_pos = vec3<f32>(2.0, 4.0, 2.0);

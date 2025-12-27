@@ -16,6 +16,12 @@ pub struct PointLight {
     pub position: Vector3,
     /// Light range (distance at which intensity falls to zero).
     pub range: f32,
+    /// Whether this light casts shadows.
+    pub cast_shadow: bool,
+    /// Shadow depth bias to prevent shadow acne.
+    pub shadow_bias: f32,
+    /// Shadow normal bias.
+    pub shadow_normal_bias: f32,
 }
 
 impl Default for PointLight {
@@ -33,6 +39,9 @@ impl PointLight {
             intensity,
             position,
             range,
+            cast_shadow: false,
+            shadow_bias: 0.005,
+            shadow_normal_bias: 0.02,
         }
     }
 
@@ -45,6 +54,20 @@ impl PointLight {
     /// Set the light position.
     pub fn set_position(&mut self, position: Vector3) {
         self.position = position;
+    }
+
+    /// Enable shadows for this light with default settings.
+    pub fn with_shadows(mut self) -> Self {
+        self.cast_shadow = true;
+        self
+    }
+
+    /// Enable shadows with custom bias values.
+    pub fn with_shadow_bias(mut self, bias: f32, normal_bias: f32) -> Self {
+        self.cast_shadow = true;
+        self.shadow_bias = bias;
+        self.shadow_normal_bias = normal_bias;
+        self
     }
 }
 

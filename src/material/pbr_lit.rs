@@ -1,9 +1,10 @@
-//! PBR material with dynamic lighting support.
+//! PBR material with dynamic lighting and shadow support.
 
 use crate::core::Id;
 use crate::geometry::Vertex;
+use crate::shadows::{MAX_CASCADES, MAX_SHADOW_LIGHTS};
 
-/// A PBR material with dynamic lighting support.
+/// A PBR material with dynamic lighting and shadow support.
 pub struct LitPbrMaterial {
     /// Unique ID.
     id: Id,
@@ -17,6 +18,8 @@ pub struct LitPbrMaterial {
     material_bind_group_layout: Option<wgpu::BindGroupLayout>,
     /// Lights bind group layout (group 3).
     lights_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    /// Shadow bind group layout (group 4).
+    shadow_bind_group_layout: Option<wgpu::BindGroupLayout>,
     /// Whether the material needs to rebuild.
     needs_update: bool,
 }
@@ -40,6 +43,7 @@ impl LitPbrMaterial {
             model_bind_group_layout: None,
             material_bind_group_layout: None,
             lights_bind_group_layout: None,
+            shadow_bind_group_layout: None,
             needs_update: true,
         }
     }
@@ -78,6 +82,12 @@ impl LitPbrMaterial {
     #[inline]
     pub fn lights_bind_group_layout(&self) -> Option<&wgpu::BindGroupLayout> {
         self.lights_bind_group_layout.as_ref()
+    }
+
+    /// Get shadow bind group layout.
+    #[inline]
+    pub fn shadow_bind_group_layout(&self) -> Option<&wgpu::BindGroupLayout> {
+        self.shadow_bind_group_layout.as_ref()
     }
 
     /// Build the render pipeline.
@@ -156,6 +166,54 @@ impl LitPbrMaterial {
                 }],
             });
 
+        // Shadow bind group layout (group 4)
+        let shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Lit PBR Shadow Bind Group Layout"),
+                entries: &[
+                    // Shadow uniform data (binding 0)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Shadow maps array (binding 1)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: std::num::NonZeroU32::new(MAX_SHADOW_LIGHTS as u32),
+                    },
+                    // Cascade shadow maps array (binding 2)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: std::num::NonZeroU32::new(MAX_CASCADES as u32),
+                    },
+                    // Comparison sampler (binding 3)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
+            });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Lit PBR Pipeline Layout"),
             bind_group_layouts: &[
@@ -163,6 +221,7 @@ impl LitPbrMaterial {
                 &model_bind_group_layout,
                 &material_bind_group_layout,
                 &lights_bind_group_layout,
+                &shadow_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -216,6 +275,7 @@ impl LitPbrMaterial {
         self.model_bind_group_layout = Some(model_bind_group_layout);
         self.material_bind_group_layout = Some(material_bind_group_layout);
         self.lights_bind_group_layout = Some(lights_bind_group_layout);
+        self.shadow_bind_group_layout = Some(shadow_bind_group_layout);
         self.needs_update = false;
     }
 
@@ -287,6 +347,47 @@ impl LitPbrMaterial {
                     binding: 0,
                     resource: buffer.as_entire_binding(),
                 }],
+            })
+        })
+    }
+
+    /// Create a shadow bind group.
+    ///
+    /// # Arguments
+    /// * `uniform_buffer` - The shadow uniform buffer
+    /// * `shadow_map_views` - Array of shadow map texture views for point/spot lights
+    /// * `cascade_map_views` - Array of cascade shadow map texture views for directional light
+    /// * `sampler` - The comparison sampler for shadow mapping
+    pub fn create_shadow_bind_group(
+        &self,
+        device: &wgpu::Device,
+        uniform_buffer: &wgpu::Buffer,
+        shadow_map_views: &[&wgpu::TextureView],
+        cascade_map_views: &[&wgpu::TextureView],
+        sampler: &wgpu::Sampler,
+    ) -> Option<wgpu::BindGroup> {
+        self.shadow_bind_group_layout.as_ref().map(|layout| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Lit PBR Shadow Bind Group"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureViewArray(shadow_map_views),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureViewArray(cascade_map_views),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
             })
         })
     }

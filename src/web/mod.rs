@@ -17,7 +17,34 @@ use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
 use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, Pass};
+use crate::shadows::{PCFMode, ShadowConfig};
 use std::collections::HashMap;
+use bytemuck::{Pod, Zeroable};
+
+/// Shadow uniform data for the shader.
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct WebShadowUniform {
+    /// Light-space view-projection matrix.
+    pub light_view_proj: [[f32; 4]; 4],
+    /// Shadow params: x=bias, y=normal_bias, z=enabled, w=pcf_mode
+    pub shadow_params: [f32; 4],
+    /// Light direction (xyz) + padding
+    pub light_direction: [f32; 4],
+    /// Shadow map size: x=width, y=height, z=1/width, w=1/height
+    pub shadow_map_size: [f32; 4],
+}
+
+impl Default for WebShadowUniform {
+    fn default() -> Self {
+        Self {
+            light_view_proj: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            shadow_params: [0.005, 0.02, 0.0, 2.0], // bias, normal_bias, disabled, PCF 3x3
+            light_direction: [-0.5, -1.0, -0.3, 0.0],
+            shadow_map_size: [1024.0, 1024.0, 1.0 / 1024.0, 1.0 / 1024.0],
+        }
+    }
+}
 
 /// Anti-aliasing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -129,6 +156,16 @@ pub struct RenApp {
     hemisphere_sky_color: [f32; 3],
     hemisphere_ground_color: [f32; 3],
     hemisphere_intensity: f32,
+    // Shadow system
+    shadow_config: ShadowConfig,
+    shadows_enabled: bool,
+    shadow_map_texture: wgpu::Texture,
+    shadow_map_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    shadow_uniform_buffer: wgpu::Buffer,
+    shadow_depth_pipeline: wgpu::RenderPipeline,
+    shadow_model_bind_group_layout: wgpu::BindGroupLayout,
+    light_direction: [f32; 3],
 }
 
 #[wasm_bindgen]
@@ -436,6 +473,170 @@ impl RenApp {
         // Create color correction pass
         let color_correction = ColorCorrectionPass::new(&device, surface_format);
 
+        // ========== Shadow System Setup ==========
+        let shadow_resolution = 1024u32;
+        let shadow_config = ShadowConfig::default();
+
+        // Create shadow map depth texture
+        let shadow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map Texture"),
+            size: wgpu::Extent3d {
+                width: shadow_resolution,
+                height: shadow_resolution,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_map_view = shadow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create comparison sampler for shadow mapping
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
+        // Create shadow uniform buffer
+        let shadow_uniform = WebShadowUniform::default();
+        let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[shadow_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Create depth-only pipeline for shadow pass
+        let shadow_shader_source = r#"
+            struct LightUniform {
+                view_proj: mat4x4<f32>,
+            }
+            struct ModelUniform {
+                model: mat4x4<f32>,
+                normal: mat3x3<f32>,
+            }
+
+            @group(0) @binding(0) var<uniform> light: LightUniform;
+            @group(1) @binding(0) var<uniform> model: ModelUniform;
+
+            @vertex
+            fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+                return light.view_proj * model.model * vec4<f32>(position, 1.0);
+            }
+
+            @fragment
+            fn fs_main() {}
+        "#;
+
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow Depth Shader"),
+            source: wgpu::ShaderSource::Wgsl(shadow_shader_source.into()),
+        });
+
+        // Light uniform bind group layout (for shadow pass)
+        let shadow_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow Light Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        // Model bind group layout for shadow pass
+        let shadow_model_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow Model Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Shadow Pipeline Layout"),
+            bind_group_layouts: &[&shadow_light_bind_group_layout, &shadow_model_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Vertex buffer layout matching the existing Vertex struct
+        let shadow_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: 32, // 3 floats pos + 3 floats normal + 2 floats uv = 8 floats = 32 bytes
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            }],
+        };
+
+        let shadow_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow Depth Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[shadow_vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_shader,
+                entry_point: Some("fs_main"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Create light uniform buffer and bind group for shadow pass
+        let light_uniform_data: [[f32; 4]; 4] = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let _shadow_light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Light Buffer"),
+            contents: bytemuck::cast_slice(&light_uniform_data),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         Ok(RenApp {
             device,
             queue,
@@ -489,6 +690,16 @@ impl RenApp {
             hemisphere_sky_color: [0.6, 0.75, 1.0],
             hemisphere_ground_color: [0.4, 0.3, 0.2],
             hemisphere_intensity: 1.0,
+            // Shadow system
+            shadow_config,
+            shadows_enabled: false,
+            shadow_map_texture,
+            shadow_map_view,
+            shadow_sampler,
+            shadow_uniform_buffer,
+            shadow_depth_pipeline,
+            shadow_model_bind_group_layout,
+            light_direction: [-0.5, -1.0, -0.3],
         })
     }
 
@@ -640,6 +851,119 @@ impl RenApp {
             b: self.clear_color.b as f64,
             a: 1.0,
         };
+
+        // ========== Shadow Pass ==========
+        if self.shadows_enabled {
+            // Calculate light-space matrix for directional light
+            let light_dir = Vector3::new(self.light_direction[0], self.light_direction[1], self.light_direction[2]).normalized();
+
+            // Create orthographic projection centered on scene
+            let light_pos = Vector3::new(-light_dir.x * 15.0, -light_dir.y * 15.0, -light_dir.z * 15.0);
+            let light_target = Vector3::ZERO;
+            let light_up = if light_dir.y.abs() > 0.99 { Vector3::new(0.0, 0.0, 1.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+
+            let light_view = Matrix4::look_at(&light_pos, &light_target, &light_up);
+            let ortho_size = 20.0;
+            let light_proj = Matrix4::orthographic(-ortho_size, ortho_size, -ortho_size, ortho_size, 0.1, 50.0);
+            let light_view_proj = light_proj.multiply(&light_view);
+
+            // Update shadow uniform
+            let resolution = self.shadow_config.resolution as f32;
+            let shadow_uniform = WebShadowUniform {
+                light_view_proj: matrix4_to_array(&light_view_proj),
+                shadow_params: [
+                    self.shadow_config.bias,
+                    self.shadow_config.normal_bias,
+                    1.0, // enabled
+                    match self.shadow_config.pcf_mode {
+                        PCFMode::None => 0.0,
+                        PCFMode::Hardware2x2 => 1.0,
+                        PCFMode::Soft3x3 => 2.0,
+                        PCFMode::Soft5x5 => 3.0,
+                        PCFMode::PoissonDisk => 4.0,
+                    },
+                ],
+                light_direction: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
+            };
+            self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
+
+            // Create light bind group for shadow pass
+            let light_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Shadow Light Buffer"),
+                contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+            let shadow_light_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shadow Light BG Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+            let light_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow Light Bind Group"),
+                layout: &shadow_light_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: light_buffer.as_entire_binding(),
+                }],
+            });
+
+            // Shadow render pass
+            {
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow Render Pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_map_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
+                shadow_pass.set_bind_group(0, &light_bind_group, &[]);
+
+                // Render all meshes to shadow map
+                for mesh in &self.meshes {
+                    // Create model bind group for shadow pass
+                    let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Shadow Model Bind Group"),
+                        layout: &self.shadow_model_bind_group_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: mesh.model_buffer.as_entire_binding(),
+                        }],
+                    });
+
+                    shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
+                    shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+        } else {
+            // Update shadow uniform with shadows disabled
+            let shadow_uniform = WebShadowUniform {
+                shadow_params: [0.005, 0.02, 0.0, 2.0], // disabled
+                ..Default::default()
+            };
+            self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
+        }
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1173,9 +1497,9 @@ impl RenApp {
                 .and_then(|n| gpu_textures.get(n))
                 .unwrap_or(&self.white_texture);
 
-            // Create texture bind group
+            // Create combined texture + shadow bind group
             let texture_bind_group = self.material
-                .create_texture_bind_group(
+                .create_texture_shadow_bind_group(
                     &self.device,
                     albedo_tex,
                     &self.default_sampler,
@@ -1183,6 +1507,9 @@ impl RenApp {
                     &self.default_sampler,
                     mr_tex,
                     &self.default_sampler,
+                    &self.shadow_uniform_buffer,
+                    &self.shadow_map_view,
+                    &self.shadow_sampler,
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -1672,6 +1999,136 @@ impl RenApp {
         self.hemisphere_intensity
     }
 
+    // ========== Shadows ==========
+
+    /// Initialize the shadow system (shadows are pre-initialized now).
+    #[wasm_bindgen]
+    pub fn init_shadows(&mut self) {
+        self.shadows_enabled = true;
+    }
+
+    /// Initialize the shadow system with a specific resolution.
+    #[wasm_bindgen]
+    pub fn init_shadows_with_resolution(&mut self, resolution: u32) {
+        self.set_shadow_resolution(resolution);
+        self.shadows_enabled = true;
+    }
+
+    /// Enable or disable shadows.
+    #[wasm_bindgen]
+    pub fn set_shadows_enabled(&mut self, enabled: bool) {
+        self.shadows_enabled = enabled;
+    }
+
+    /// Check if shadows are enabled.
+    #[wasm_bindgen]
+    pub fn is_shadows_enabled(&self) -> bool {
+        self.shadows_enabled
+    }
+
+    /// Set shadow map resolution (256, 512, 1024, 2048, or 4096).
+    #[wasm_bindgen]
+    pub fn set_shadow_resolution(&mut self, resolution: u32) {
+        let resolution = resolution.clamp(256, 4096);
+        self.shadow_config.resolution = resolution;
+
+        // Recreate shadow map texture with new resolution
+        self.shadow_map_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map Texture"),
+            size: wgpu::Extent3d {
+                width: resolution,
+                height: resolution,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.shadow_map_view = self.shadow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Note: Changing shadow resolution requires recreating all mesh texture bind groups
+        // since shadow resources are now merged into the texture bind group (group 3).
+        // This is a tradeoff for staying within WebGPU's 4 bind group limit.
+        // For now, meshes created before resolution change will use the old shadow map.
+    }
+
+    /// Get current shadow resolution.
+    #[wasm_bindgen]
+    pub fn get_shadow_resolution(&self) -> u32 {
+        self.shadow_config.resolution
+    }
+
+    /// Set PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk).
+    #[wasm_bindgen]
+    pub fn set_shadow_pcf_mode(&mut self, mode: u32) {
+        let pcf_mode = match mode {
+            0 => PCFMode::None,
+            1 => PCFMode::Hardware2x2,
+            2 => PCFMode::Soft3x3,
+            3 => PCFMode::Soft5x5,
+            _ => PCFMode::PoissonDisk,
+        };
+        self.shadow_config.pcf_mode = pcf_mode;
+    }
+
+    /// Get current PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk).
+    #[wasm_bindgen]
+    pub fn get_shadow_pcf_mode(&self) -> u32 {
+        match self.shadow_config.pcf_mode {
+            PCFMode::None => 0,
+            PCFMode::Hardware2x2 => 1,
+            PCFMode::Soft3x3 => 2,
+            PCFMode::Soft5x5 => 3,
+            PCFMode::PoissonDisk => 4,
+        }
+    }
+
+    /// Set shadow bias (0.0 - 0.1, default 0.005).
+    #[wasm_bindgen]
+    pub fn set_shadow_bias(&mut self, bias: f32) {
+        self.shadow_config.bias = bias.clamp(0.0, 0.1);
+    }
+
+    /// Get current shadow bias.
+    #[wasm_bindgen]
+    pub fn get_shadow_bias(&self) -> f32 {
+        self.shadow_config.bias
+    }
+
+    /// Set shadow normal bias (0.0 - 0.1, default 0.02).
+    #[wasm_bindgen]
+    pub fn set_shadow_normal_bias(&mut self, normal_bias: f32) {
+        self.shadow_config.normal_bias = normal_bias.clamp(0.0, 0.1);
+    }
+
+    /// Get current shadow normal bias.
+    #[wasm_bindgen]
+    pub fn get_shadow_normal_bias(&self) -> f32 {
+        self.shadow_config.normal_bias
+    }
+
+    /// Set number of shadow cascades for directional lights (1-4).
+    /// Note: Currently using single shadow map, cascades not yet implemented in web.
+    #[wasm_bindgen]
+    pub fn set_shadow_cascades(&mut self, _num_cascades: u32) {
+        // Cascades not yet implemented - using single shadow map
+    }
+
+    /// Get current number of shadow cascades.
+    #[wasm_bindgen]
+    pub fn get_shadow_cascades(&self) -> u32 {
+        1 // Currently using single shadow map
+    }
+
+    /// Set the light direction for shadow casting.
+    #[wasm_bindgen]
+    pub fn set_shadow_light_direction(&mut self, x: f32, y: f32, z: f32) {
+        self.light_direction = [x, y, z];
+    }
+
     /// Add demo shapes to showcase bloom effect.
     #[wasm_bindgen]
     pub fn add_demo_shapes(&mut self) -> Result<(), JsValue> {
@@ -1852,9 +2309,9 @@ impl RenApp {
             _padding: [0.0; 2],
         };
 
-        // Create texture bind group with default textures
+        // Create combined texture + shadow bind group with default textures
         let texture_bind_group = self.material
-            .create_texture_bind_group(
+            .create_texture_shadow_bind_group(
                 &self.device,
                 &self.white_texture,
                 &self.default_sampler,
@@ -1862,6 +2319,9 @@ impl RenApp {
                 &self.default_sampler,
                 &self.white_texture,
                 &self.default_sampler,
+                &self.shadow_uniform_buffer,
+                &self.shadow_map_view,
+                &self.shadow_sampler,
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 

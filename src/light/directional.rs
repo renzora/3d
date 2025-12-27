@@ -14,6 +14,12 @@ pub struct DirectionalLight {
     pub intensity: f32,
     /// Light direction (normalized).
     direction: Vector3,
+    /// Whether this light casts shadows.
+    pub cast_shadow: bool,
+    /// Shadow depth bias to prevent shadow acne.
+    pub shadow_bias: f32,
+    /// Shadow normal bias.
+    pub shadow_normal_bias: f32,
 }
 
 impl Default for DirectionalLight {
@@ -30,6 +36,9 @@ impl DirectionalLight {
             color,
             intensity,
             direction: direction.normalized(),
+            cast_shadow: false,
+            shadow_bias: 0.005,
+            shadow_normal_bias: 0.02,
         }
     }
 
@@ -62,6 +71,20 @@ impl DirectionalLight {
     /// Point the light at a target from a position.
     pub fn look_at(&mut self, from: Vector3, to: Vector3) {
         self.direction = (to - from).normalized();
+    }
+
+    /// Enable shadows for this light with default settings.
+    pub fn with_shadows(mut self) -> Self {
+        self.cast_shadow = true;
+        self
+    }
+
+    /// Enable shadows with custom bias values.
+    pub fn with_shadow_bias(mut self, bias: f32, normal_bias: f32) -> Self {
+        self.cast_shadow = true;
+        self.shadow_bias = bias;
+        self.shadow_normal_bias = normal_bias;
+        self
     }
 }
 

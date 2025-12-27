@@ -29,6 +29,10 @@ impl RenderInfo {
 }
 
 /// The main renderer.
+///
+/// Note: The web app (src/web/mod.rs) has its own complete rendering pipeline
+/// with shadow support. This renderer provides a basic implementation for
+/// non-web use cases.
 pub struct Renderer {
     /// Render configuration.
     #[allow(dead_code)]

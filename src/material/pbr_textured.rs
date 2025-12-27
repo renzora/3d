@@ -69,10 +69,8 @@ pub struct TexturedPbrMaterial {
     model_bind_group_layout: Option<wgpu::BindGroupLayout>,
     /// Material bind group layout.
     material_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    /// Texture bind group layout.
+    /// Texture + shadow bind group layout (combined due to WebGPU 4 bind group limit).
     texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    /// Default textures bind group.
-    default_texture_bind_group: Option<wgpu::BindGroup>,
     /// Whether the material needs to rebuild.
     needs_update: bool,
 }
@@ -103,7 +101,6 @@ impl TexturedPbrMaterial {
             model_bind_group_layout: None,
             material_bind_group_layout: None,
             texture_bind_group_layout: None,
-            default_texture_bind_group: None,
             needs_update: true,
         }
     }
@@ -156,7 +153,7 @@ impl TexturedPbrMaterial {
         self.material_bind_group_layout.as_ref()
     }
 
-    /// Get texture bind group layout.
+    /// Get texture bind group layout (includes shadow bindings).
     #[inline]
     pub fn texture_bind_group_layout(&self) -> Option<&wgpu::BindGroupLayout> {
         self.texture_bind_group_layout.as_ref()
@@ -237,12 +234,13 @@ impl TexturedPbrMaterial {
                 }],
             });
 
-        // Texture bind group layout (group 3)
+        // Texture + Shadow bind group layout (group 3)
+        // Combined to stay within WebGPU's 4 bind group limit
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Textured PBR Texture Bind Group Layout"),
+                label: Some("Textured PBR Texture+Shadow Bind Group Layout"),
                 entries: &[
-                    // Albedo texture
+                    // Albedo texture (binding 0)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -253,13 +251,14 @@ impl TexturedPbrMaterial {
                         },
                         count: None,
                     },
+                    // Albedo sampler (binding 1)
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
-                    // Normal texture
+                    // Normal texture (binding 2)
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -270,13 +269,14 @@ impl TexturedPbrMaterial {
                         },
                         count: None,
                     },
+                    // Normal sampler (binding 3)
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
-                    // Metallic-roughness texture
+                    // Metallic-roughness texture (binding 4)
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -287,10 +287,40 @@ impl TexturedPbrMaterial {
                         },
                         count: None,
                     },
+                    // Metallic-roughness sampler (binding 5)
                     wgpu::BindGroupLayoutEntry {
                         binding: 5,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // Shadow uniform buffer (binding 6)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Shadow map texture (binding 7)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Shadow comparison sampler (binding 8)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
                 ],
@@ -351,49 +381,74 @@ impl TexturedPbrMaterial {
             cache: None,
         });
 
-        // Create default textures for when no textures are provided
-        let white_texture = Texture2D::white(device, queue);
-        let normal_texture = Texture2D::default_normal(device, queue);
-        let sampler = Sampler::linear(device);
-
-        let default_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Default Texture Bind Group"),
-            layout: &texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(white_texture.view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler.wgpu_sampler()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(normal_texture.view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(sampler.wgpu_sampler()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(white_texture.view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(sampler.wgpu_sampler()),
-                },
-            ],
-        });
-
         self.pipeline = Some(pipeline);
         self.camera_bind_group_layout = Some(camera_bind_group_layout);
         self.model_bind_group_layout = Some(model_bind_group_layout);
         self.material_bind_group_layout = Some(material_bind_group_layout);
         self.texture_bind_group_layout = Some(texture_bind_group_layout);
-        self.default_texture_bind_group = Some(default_texture_bind_group);
         self.needs_update = false;
+    }
+
+    /// Create a combined texture + shadow bind group.
+    pub fn create_texture_shadow_bind_group(
+        &self,
+        device: &wgpu::Device,
+        albedo: &Texture2D,
+        albedo_sampler: &Sampler,
+        normal: &Texture2D,
+        normal_sampler: &Sampler,
+        metallic_roughness: &Texture2D,
+        metallic_roughness_sampler: &Sampler,
+        shadow_uniform_buffer: &wgpu::Buffer,
+        shadow_map_view: &wgpu::TextureView,
+        shadow_sampler: &wgpu::Sampler,
+    ) -> Option<wgpu::BindGroup> {
+        self.texture_bind_group_layout.as_ref().map(|layout| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Textured PBR Texture+Shadow Bind Group"),
+                layout,
+                entries: &[
+                    // Textures (bindings 0-5)
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(albedo.view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(albedo_sampler.wgpu_sampler()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(normal.view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(normal_sampler.wgpu_sampler()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(metallic_roughness.view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(metallic_roughness_sampler.wgpu_sampler()),
+                    },
+                    // Shadow (bindings 6-8)
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: shadow_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(shadow_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    },
+                ],
+            })
+        })
     }
 
     /// Create a camera bind group.
@@ -450,56 +505,6 @@ impl TexturedPbrMaterial {
         })
     }
 
-    /// Create a texture bind group with custom textures.
-    pub fn create_texture_bind_group(
-        &self,
-        device: &wgpu::Device,
-        albedo: &Texture2D,
-        albedo_sampler: &Sampler,
-        normal: &Texture2D,
-        normal_sampler: &Sampler,
-        metallic_roughness: &Texture2D,
-        metallic_roughness_sampler: &Sampler,
-    ) -> Option<wgpu::BindGroup> {
-        self.texture_bind_group_layout.as_ref().map(|layout| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Textured PBR Texture Bind Group"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(albedo.view()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(albedo_sampler.wgpu_sampler()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(normal.view()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(normal_sampler.wgpu_sampler()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(metallic_roughness.view()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(metallic_roughness_sampler.wgpu_sampler()),
-                    },
-                ],
-            })
-        })
-    }
-
-    /// Get the default texture bind group.
-    #[inline]
-    pub fn default_texture_bind_group(&self) -> Option<&wgpu::BindGroup> {
-        self.default_texture_bind_group.as_ref()
-    }
 
     /// Check if needs update.
     #[inline]

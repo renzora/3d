@@ -45,6 +45,7 @@ pub mod material;
 pub mod camera;
 pub mod texture;
 pub mod light;
+pub mod shadows;
 pub mod controls;
 pub mod objects;
 pub mod helpers;
@@ -67,6 +68,7 @@ pub mod prelude {
     pub use crate::camera::*;
     pub use crate::texture::*;
     pub use crate::light::*;
+    pub use crate::shadows::*;
     pub use crate::controls::*;
     pub use crate::objects::*;
     pub use crate::helpers::*;

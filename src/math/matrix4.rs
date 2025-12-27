@@ -340,17 +340,19 @@ impl Matrix4 {
     }
 
     /// Create an orthographic projection matrix.
+    /// Uses wgpu/Vulkan depth range (0 to 1).
     pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Self {
         let w = 1.0 / (right - left);
         let h = 1.0 / (top - bottom);
         let d = 1.0 / (far - near);
 
+        // wgpu uses 0-1 depth range (not -1 to 1 like OpenGL)
         Self {
             elements: [
                 2.0 * w, 0.0, 0.0, 0.0,
                 0.0, 2.0 * h, 0.0, 0.0,
-                0.0, 0.0, -2.0 * d, 0.0,
-                -(right + left) * w, -(top + bottom) * h, -(far + near) * d, 1.0,
+                0.0, 0.0, -d, 0.0,
+                -(right + left) * w, -(top + bottom) * h, -near * d, 1.0,
             ],
         }
     }

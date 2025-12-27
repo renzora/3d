@@ -22,6 +22,12 @@ pub struct SpotLight {
     inner_angle: f32,
     /// Outer cone angle in radians (falloff to zero).
     outer_angle: f32,
+    /// Whether this light casts shadows.
+    pub cast_shadow: bool,
+    /// Shadow depth bias to prevent shadow acne.
+    pub shadow_bias: f32,
+    /// Shadow normal bias.
+    pub shadow_normal_bias: f32,
 }
 
 impl Default for SpotLight {
@@ -67,6 +73,9 @@ impl SpotLight {
             range,
             inner_angle,
             outer_angle,
+            cast_shadow: false,
+            shadow_bias: 0.005,
+            shadow_normal_bias: 0.02,
         }
     }
 
@@ -118,6 +127,20 @@ impl SpotLight {
     /// Set cone angles in degrees.
     pub fn set_angles_degrees(&mut self, inner: f32, outer: f32) {
         self.set_angles(inner.to_radians(), outer.to_radians());
+    }
+
+    /// Enable shadows for this light with default settings.
+    pub fn with_shadows(mut self) -> Self {
+        self.cast_shadow = true;
+        self
+    }
+
+    /// Enable shadows with custom bias values.
+    pub fn with_shadow_bias(mut self, bias: f32, normal_bias: f32) -> Self {
+        self.cast_shadow = true;
+        self.shadow_bias = bias;
+        self.shadow_normal_bias = normal_bias;
+        self
     }
 }
 
