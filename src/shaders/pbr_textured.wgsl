@@ -372,6 +372,7 @@ fn pcss_pcf(uv: vec2<f32>, receiver_depth: f32, filter_radius: f32, screen_pos: 
 }
 
 // Full PCSS algorithm
+// Note: Restructured to avoid non-uniform control flow before textureSampleCompare
 fn calculate_shadow_pcss(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, screen_pos: vec2<f32>) -> f32 {
     // Transform to light space
     let light_space_pos = shadow.light_view_proj * vec4<f32>(world_pos, 1.0);
@@ -390,32 +391,30 @@ fn calculate_shadow_pcss(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3
 
     let uv = clamp(vec2<f32>(proj_x, proj_y), vec2<f32>(0.001), vec2<f32>(0.999));
 
-    // Check bounds
+    // Check bounds (computed but not used for early return to maintain uniform control flow)
     let in_bounds = step(0.0, proj_x) * step(proj_x, 1.0) * step(0.0, proj_y) * step(proj_y, 1.0) * step(0.0, proj_z) * step(proj_z, 1.0);
-    if (in_bounds < 0.5) {
-        return 1.0;
-    }
 
     // Step 1: Blocker search
     let search_radius = shadow.pcss_params.z;
     let blocker_result = pcss_blocker_search(uv, proj_z, search_radius, screen_pos);
 
-    // No blockers found - fully lit
-    if (blocker_result.y < 0.5) {
-        return 1.0;
-    }
-
-    // Step 2: Estimate penumbra size
-    let penumbra = pcss_estimate_penumbra(proj_z, blocker_result.x);
+    // Step 2: Estimate penumbra size (use safe default if no blockers)
+    let has_blockers = step(0.5, blocker_result.y);
+    let safe_blocker_depth = select(proj_z * 0.5, blocker_result.x, has_blockers > 0.5);
+    let penumbra = pcss_estimate_penumbra(proj_z, safe_blocker_depth);
 
     // Clamp filter radius
     let max_radius = shadow.pcss_params.w;
     let filter_radius = clamp(penumbra * shadow.shadow_map_size.x, 1.0, max_radius);
 
-    // Step 3: PCF with variable radius
+    // Step 3: PCF with variable radius (always execute to maintain uniform control flow)
     let shadow_factor = pcss_pcf(uv, receiver_depth, filter_radius, screen_pos);
 
-    return shadow_factor;
+    // Apply bounds check and blocker check via blending instead of branching
+    // If out of bounds or no blockers, return 1.0 (fully lit)
+    let final_shadow = mix(1.0, shadow_factor, in_bounds * has_blockers);
+
+    return final_shadow;
 }
 
 // ============ Contact Shadows (Screen-Space Ray Marching) ============

@@ -16,7 +16,7 @@ use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
-use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, Pass};
+use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, Pass};
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
@@ -172,6 +172,8 @@ pub struct RenApp {
     smaa: SmaaPass,
     taa: TaaPass,
     ssao: SsaoPass,
+    gtao: GtaoPass,
+    lumen: LumenPass,
     ssr: SsrPass,
     vignette: VignettePass,
     dof: DofPass,
@@ -468,7 +470,7 @@ impl RenApp {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: hdr_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -481,7 +483,7 @@ impl RenApp {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: hdr_format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let bloom_input_view = bloom_input_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -546,6 +548,18 @@ impl RenApp {
         let mut ssao = SsaoPass::new();
         ssao.set_quality(SsaoQuality::Medium);
         ssao.init(&device, &queue, hdr_format, width, height);
+
+        // Create GTAO pass (disabled by default, more advanced than SSAO)
+        let mut gtao = GtaoPass::new();
+        gtao.set_quality(GtaoQuality::Medium);
+        gtao.set_enabled(false); // Disabled by default, user can switch from SSAO
+        gtao.init(&device, &queue, hdr_format, width, height);
+
+        // Create Lumen GI pass (disabled by default)
+        let mut lumen = LumenPass::new();
+        lumen.set_quality(LumenQuality::Medium);
+        lumen.set_enabled(false);
+        lumen.init(&device, &queue, hdr_format, width, height);
 
         // Create SSR pass (renders to HDR scene)
         let mut ssr = SsrPass::new();
@@ -890,6 +904,8 @@ impl RenApp {
             smaa,
             taa,
             ssao,
+            gtao,
+            lumen,
             ssr,
             vignette,
             dof,
@@ -1070,6 +1086,14 @@ impl RenApp {
                 self.ssao.set_projection(proj, inv_proj, camera.near, camera.far);
             }
 
+            // Update GTAO projection matrices
+            if self.gtao.enabled() {
+                let proj = matrix4_to_array(camera.projection_matrix());
+                let inv_proj = matrix4_to_array(&camera.projection_matrix().inverse());
+                let view = matrix4_to_array(camera.view_matrix());
+                self.gtao.set_matrices(proj, inv_proj, view, camera.near, camera.far, camera.fov);
+            }
+
             // Update DoF camera planes
             if self.dof.enabled() {
                 self.dof.set_camera_planes(camera.near, camera.far);
@@ -1082,6 +1106,14 @@ impl RenApp {
                 let view = matrix4_to_array(camera.view_matrix());
                 self.ssr.set_projection(proj, inv_proj, camera.near, camera.far);
                 self.ssr.set_view(view);
+            }
+
+            // Update Lumen GI matrices
+            if self.lumen.enabled() {
+                let proj = matrix4_to_array(camera.projection_matrix());
+                let inv_proj = matrix4_to_array(&camera.projection_matrix().inverse());
+                let view = matrix4_to_array(camera.view_matrix());
+                self.lumen.set_matrices(proj, inv_proj, view, camera.near, camera.far);
             }
 
             // Update outline camera planes
@@ -1489,8 +1521,38 @@ impl RenApp {
             },
         );
 
-        // Apply SSAO (reads depth + bloom_input, outputs to scene_view with AO applied)
-        self.ssao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        // Apply AO (SSAO or GTAO - only one should be enabled at a time)
+        // GTAO is more physically accurate but more expensive
+        if self.gtao.enabled() {
+            self.gtao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        } else {
+            self.ssao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        }
+
+        // Apply Lumen GI if enabled (adds global illumination to scene)
+        if self.lumen.enabled() {
+            self.lumen.render_with_depth(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
+            // Copy result back to scene_view for next passes
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.bloom_input_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.scene_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         // Apply bloom post-processing (reads from bloom_input, additively blends to scene_view)
         self.bloom.render(&mut encoder, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
@@ -1645,7 +1707,7 @@ impl RenApp {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.hdr_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
             self.scene_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1658,7 +1720,7 @@ impl RenApp {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.hdr_format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             self.bloom_input_view = self.bloom_input_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1697,6 +1759,8 @@ impl RenApp {
             self.smaa.resize(width, height, &self.device);
             self.taa.resize(width, height, &self.device);
             self.ssao.resize(width, height, &self.device);
+            self.gtao.resize(width, height, &self.device);
+            self.lumen.resize(width, height, &self.device);
             self.ssr.resize(width, height, &self.device);
             self.vignette.resize(width, height, &self.device);
             self.dof.resize(width, height, &self.device);
@@ -2172,6 +2236,111 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_ssao_bias(&mut self, bias: f32) {
         self.ssao.set_bias(bias);
+    }
+
+    // ==================== GTAO (Ground Truth Ambient Occlusion) ====================
+
+    /// Enable or disable GTAO (more accurate than SSAO but more expensive).
+    /// Note: GTAO and SSAO are mutually exclusive - enabling one should disable the other.
+    #[wasm_bindgen]
+    pub fn set_gtao_enabled(&mut self, enabled: bool) {
+        self.gtao.set_enabled(enabled);
+        // When enabling GTAO, disable SSAO and vice versa
+        if enabled {
+            self.ssao.set_enabled(false);
+        }
+    }
+
+    /// Check if GTAO is enabled.
+    #[wasm_bindgen]
+    pub fn is_gtao_enabled(&self) -> bool {
+        self.gtao.enabled()
+    }
+
+    /// Set GTAO radius (0.1 - 2.0 recommended).
+    #[wasm_bindgen]
+    pub fn set_gtao_radius(&mut self, radius: f32) {
+        self.gtao.set_radius(radius);
+    }
+
+    /// Set GTAO intensity (0.5 - 3.0 recommended).
+    #[wasm_bindgen]
+    pub fn set_gtao_intensity(&mut self, intensity: f32) {
+        self.gtao.set_intensity(intensity);
+    }
+
+    /// Set GTAO power/contrast (0.5 - 4.0, default 1.5).
+    #[wasm_bindgen]
+    pub fn set_gtao_power(&mut self, power: f32) {
+        self.gtao.set_power(power);
+    }
+
+    /// Set GTAO quality (0=Low, 1=Medium, 2=High, 3=Ultra).
+    #[wasm_bindgen]
+    pub fn set_gtao_quality(&mut self, quality: u32) {
+        let q = match quality {
+            0 => GtaoQuality::Low,
+            1 => GtaoQuality::Medium,
+            2 => GtaoQuality::High,
+            _ => GtaoQuality::Ultra,
+        };
+        self.gtao.set_quality(q);
+    }
+
+    /// Set GTAO falloff start (0.0 - 1.0, fraction of radius where falloff begins).
+    #[wasm_bindgen]
+    pub fn set_gtao_falloff(&mut self, falloff: f32) {
+        self.gtao.set_falloff_start(falloff);
+    }
+
+    /// Set GTAO thin occluder compensation (0.0 - 1.0).
+    #[wasm_bindgen]
+    pub fn set_gtao_thin_occluder(&mut self, comp: f32) {
+        self.gtao.set_thin_occluder_compensation(comp);
+    }
+
+    // ==================== Lumen GI (Global Illumination) ====================
+
+    /// Enable or disable Lumen GI (screen-space global illumination).
+    #[wasm_bindgen]
+    pub fn set_lumen_enabled(&mut self, enabled: bool) {
+        self.lumen.set_enabled(enabled);
+    }
+
+    /// Check if Lumen GI is enabled.
+    #[wasm_bindgen]
+    pub fn is_lumen_enabled(&self) -> bool {
+        self.lumen.enabled()
+    }
+
+    /// Set Lumen GI quality (0=Low, 1=Medium, 2=High, 3=Ultra).
+    #[wasm_bindgen]
+    pub fn set_lumen_quality(&mut self, quality: u32) {
+        let q = match quality {
+            0 => LumenQuality::Low,
+            1 => LumenQuality::Medium,
+            2 => LumenQuality::High,
+            _ => LumenQuality::Ultra,
+        };
+        self.lumen.set_quality(q);
+    }
+
+    /// Set Lumen GI intensity (0.0 - 3.0 recommended, default 1.0).
+    #[wasm_bindgen]
+    pub fn set_lumen_intensity(&mut self, intensity: f32) {
+        self.lumen.set_intensity(intensity);
+    }
+
+    /// Set Lumen GI max trace distance (1.0 - 20.0 recommended, default 5.0).
+    #[wasm_bindgen]
+    pub fn set_lumen_max_distance(&mut self, distance: f32) {
+        self.lumen.set_max_distance(distance);
+    }
+
+    /// Set Lumen GI thickness for depth testing (0.01 - 0.5 recommended, default 0.1).
+    #[wasm_bindgen]
+    pub fn set_lumen_thickness(&mut self, thickness: f32) {
+        self.lumen.set_thickness(thickness);
     }
 
     /// Set IBL diffuse intensity (environment lighting).
@@ -3194,6 +3363,39 @@ impl RenApp {
         }
 
         self.add_geometry(&vertices, &indices, position, color, metallic, roughness)
+    }
+
+    /// Add a floor plane at the given Y position.
+    #[wasm_bindgen]
+    pub fn add_floor(
+        &mut self,
+        y: f32,
+        size: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), JsValue> {
+        let s = size / 2.0;
+        let tile = size / 4.0; // UV tiling
+
+        // Floor plane vertices: position (3) + normal (3) + uv (2)
+        #[rustfmt::skip]
+        let vertices: Vec<f32> = vec![
+            // Floor quad facing up (Y+)
+            -s, 0.0,  s,  0.0, 1.0, 0.0,  0.0, tile,
+             s, 0.0,  s,  0.0, 1.0, 0.0,  tile, tile,
+             s, 0.0, -s,  0.0, 1.0, 0.0,  tile, 0.0,
+            -s, 0.0, -s,  0.0, 1.0, 0.0,  0.0, 0.0,
+        ];
+
+        #[rustfmt::skip]
+        let indices: Vec<u32> = vec![
+            0, 1, 2, 0, 2, 3,
+        ];
+
+        self.add_geometry(&vertices, &indices, [0.0, y, 0.0], [r, g, b, 1.0], metallic, roughness)
     }
 
     /// Internal helper to add geometry with material.

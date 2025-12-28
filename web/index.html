@@ -714,6 +714,77 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>GTAO (Ground Truth AO)</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">More accurate than SSAO. Enabling disables SSAO.</p>
+                <label>
+                    <input type="checkbox" id="gtao-enabled">
+                    Enable
+                </label>
+                <label>
+                    Quality
+                    <select id="gtao-quality">
+                        <option value="0">Low</option>
+                        <option value="1" selected>Medium</option>
+                        <option value="2">High</option>
+                        <option value="3">Ultra</option>
+                    </select>
+                </label>
+                <label>
+                    Radius
+                    <input type="range" id="gtao-radius" min="0.1" max="2" step="0.1" value="0.5">
+                    <span class="value" id="gtao-radius-val">0.5</span>
+                </label>
+                <label>
+                    Intensity
+                    <input type="range" id="gtao-intensity" min="0.5" max="3" step="0.1" value="1.5">
+                    <span class="value" id="gtao-intensity-val">1.5</span>
+                </label>
+                <label>
+                    Power
+                    <input type="range" id="gtao-power" min="0.5" max="4" step="0.1" value="1.5">
+                    <span class="value" id="gtao-power-val">1.5</span>
+                </label>
+                <label>
+                    Falloff
+                    <input type="range" id="gtao-falloff" min="0" max="1" step="0.05" value="0.2">
+                    <span class="value" id="gtao-falloff-val">0.2</span>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Lumen GI (Global Illumination)</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Screen-space global illumination for indirect lighting.</p>
+                <label>
+                    <input type="checkbox" id="lumen-enabled">
+                    Enable
+                </label>
+                <label>
+                    Quality
+                    <select id="lumen-quality">
+                        <option value="0">Low</option>
+                        <option value="1" selected>Medium</option>
+                        <option value="2">High</option>
+                        <option value="3">Ultra</option>
+                    </select>
+                </label>
+                <label>
+                    Intensity
+                    <input type="range" id="lumen-intensity" min="0" max="3" step="0.1" value="1.0">
+                    <span class="value" id="lumen-intensity-val">1.0</span>
+                </label>
+                <label>
+                    Max Distance
+                    <input type="range" id="lumen-distance" min="1" max="20" step="0.5" value="5.0">
+                    <span class="value" id="lumen-distance-val">5.0</span>
+                </label>
+                <label>
+                    Thickness
+                    <input type="range" id="lumen-thickness" min="0.01" max="0.5" step="0.01" value="0.1">
+                    <span class="value" id="lumen-thickness-val">0.10</span>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>IBL (Environment Lighting)</h3>
                 <label>
                     Diffuse
@@ -942,6 +1013,9 @@
                 });
 
                 app.add_demo_shapes();
+
+                // Add floor plane (y=0, size=20, gray color, non-metallic, slightly rough)
+                app.add_floor(0.0, 20.0, 0.3, 0.3, 0.3, 0.0, 0.7);
 
                 // Bloom controls
                 document.getElementById('bloom-enabled').addEventListener('change', (e) => {
@@ -1426,6 +1500,74 @@
                     saveSettings();
                 });
 
+                // GTAO controls
+                document.getElementById('gtao-enabled').addEventListener('change', (e) => {
+                    if (app.set_gtao_enabled) {
+                        app.set_gtao_enabled(e.target.checked);
+                        // Uncheck SSAO when GTAO is enabled (they're mutually exclusive)
+                        if (e.target.checked) {
+                            document.getElementById('ssao-enabled').checked = false;
+                        }
+                    }
+                    saveSettings();
+                });
+                document.getElementById('gtao-quality').addEventListener('change', (e) => {
+                    if (app.set_gtao_quality) app.set_gtao_quality(parseInt(e.target.value));
+                    saveSettings();
+                });
+                document.getElementById('gtao-radius').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_gtao_radius) app.set_gtao_radius(val);
+                    document.getElementById('gtao-radius-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('gtao-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_gtao_intensity) app.set_gtao_intensity(val);
+                    document.getElementById('gtao-intensity-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('gtao-power').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_gtao_power) app.set_gtao_power(val);
+                    document.getElementById('gtao-power-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('gtao-falloff').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_gtao_falloff) app.set_gtao_falloff(val);
+                    document.getElementById('gtao-falloff-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+
+                // Lumen GI controls
+                document.getElementById('lumen-enabled').addEventListener('change', (e) => {
+                    if (app.set_lumen_enabled) app.set_lumen_enabled(e.target.checked);
+                    saveSettings();
+                });
+                document.getElementById('lumen-quality').addEventListener('change', (e) => {
+                    if (app.set_lumen_quality) app.set_lumen_quality(parseInt(e.target.value));
+                    saveSettings();
+                });
+                document.getElementById('lumen-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_lumen_intensity) app.set_lumen_intensity(val);
+                    document.getElementById('lumen-intensity-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('lumen-distance').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_lumen_max_distance) app.set_lumen_max_distance(val);
+                    document.getElementById('lumen-distance-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('lumen-thickness').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_lumen_thickness) app.set_lumen_thickness(val);
+                    document.getElementById('lumen-thickness-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+
                 // IBL controls
                 document.getElementById('ibl-diffuse').addEventListener('input', (e) => {
                     const val = parseFloat(e.target.value);
@@ -1581,6 +1723,19 @@
                         ssaoRadius: document.getElementById('ssao-radius').value,
                         ssaoIntensity: document.getElementById('ssao-intensity').value,
                         ssaoBias: document.getElementById('ssao-bias').value,
+                        // GTAO
+                        gtaoEnabled: document.getElementById('gtao-enabled').checked,
+                        gtaoQuality: document.getElementById('gtao-quality').value,
+                        gtaoRadius: document.getElementById('gtao-radius').value,
+                        gtaoIntensity: document.getElementById('gtao-intensity').value,
+                        gtaoPower: document.getElementById('gtao-power').value,
+                        gtaoFalloff: document.getElementById('gtao-falloff').value,
+                        // Lumen GI
+                        lumenEnabled: document.getElementById('lumen-enabled').checked,
+                        lumenQuality: document.getElementById('lumen-quality').value,
+                        lumenIntensity: document.getElementById('lumen-intensity').value,
+                        lumenDistance: document.getElementById('lumen-distance').value,
+                        lumenThickness: document.getElementById('lumen-thickness').value,
                         // IBL
                         iblDiffuse: document.getElementById('ibl-diffuse').value,
                         iblSpecular: document.getElementById('ibl-specular').value,
@@ -1674,6 +1829,17 @@
                         setVal('ssao-radius', s.ssaoRadius, 'ssao-radius-val');
                         setVal('ssao-intensity', s.ssaoIntensity, 'ssao-intensity-val');
                         setVal('ssao-bias', s.ssaoBias, 'ssao-bias-val');
+                        setVal('gtao-enabled', s.gtaoEnabled);
+                        setVal('gtao-quality', s.gtaoQuality);
+                        setVal('gtao-radius', s.gtaoRadius, 'gtao-radius-val');
+                        setVal('gtao-intensity', s.gtaoIntensity, 'gtao-intensity-val');
+                        setVal('gtao-power', s.gtaoPower, 'gtao-power-val');
+                        setVal('gtao-falloff', s.gtaoFalloff, 'gtao-falloff-val');
+                        setVal('lumen-enabled', s.lumenEnabled);
+                        setVal('lumen-quality', s.lumenQuality);
+                        setVal('lumen-intensity', s.lumenIntensity, 'lumen-intensity-val');
+                        setVal('lumen-distance', s.lumenDistance, 'lumen-distance-val');
+                        setVal('lumen-thickness', s.lumenThickness, 'lumen-thickness-val');
                         setVal('ibl-diffuse', s.iblDiffuse, 'ibl-diffuse-val');
                         setVal('ibl-specular', s.iblSpecular, 'ibl-specular-val');
                         setVal('aa-mode', s.aaMode);
@@ -1738,6 +1904,17 @@
                     app.set_ssao_radius(parseFloat(document.getElementById('ssao-radius').value));
                     app.set_ssao_intensity(parseFloat(document.getElementById('ssao-intensity').value));
                     if (app.set_ssao_bias) app.set_ssao_bias(parseFloat(document.getElementById('ssao-bias').value));
+                    if (app.set_gtao_enabled) app.set_gtao_enabled(document.getElementById('gtao-enabled').checked);
+                    if (app.set_gtao_quality) app.set_gtao_quality(parseInt(document.getElementById('gtao-quality').value));
+                    if (app.set_gtao_radius) app.set_gtao_radius(parseFloat(document.getElementById('gtao-radius').value));
+                    if (app.set_gtao_intensity) app.set_gtao_intensity(parseFloat(document.getElementById('gtao-intensity').value));
+                    if (app.set_gtao_power) app.set_gtao_power(parseFloat(document.getElementById('gtao-power').value));
+                    if (app.set_gtao_falloff) app.set_gtao_falloff(parseFloat(document.getElementById('gtao-falloff').value));
+                    if (app.set_lumen_enabled) app.set_lumen_enabled(document.getElementById('lumen-enabled').checked);
+                    if (app.set_lumen_quality) app.set_lumen_quality(parseInt(document.getElementById('lumen-quality').value));
+                    if (app.set_lumen_intensity) app.set_lumen_intensity(parseFloat(document.getElementById('lumen-intensity').value));
+                    if (app.set_lumen_max_distance) app.set_lumen_max_distance(parseFloat(document.getElementById('lumen-distance').value));
+                    if (app.set_lumen_thickness) app.set_lumen_thickness(parseFloat(document.getElementById('lumen-thickness').value));
                     if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(parseFloat(document.getElementById('ibl-diffuse').value));
                     if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(parseFloat(document.getElementById('ibl-specular').value));
                     app.set_aa_mode(parseInt(document.getElementById('aa-mode').value));

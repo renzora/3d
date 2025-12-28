@@ -687,7 +687,7 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 ### 14.5.8 Advanced Ambient Occlusion (`src/postprocessing/effects/`)
 | File | Description | Status |
 |------|-------------|--------|
-| `gtao_pass.rs` | Ground Truth Ambient Occlusion | |
+| `gtao_pass.rs` | Ground Truth Ambient Occlusion | ✅ |
 | `ssgi_pass.rs` | Screen-Space Global Illumination | |
 | `bent_normals.rs` | Bent normals for improved AO | |
 
@@ -707,7 +707,7 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 | `prefilter_env.wgsl` | Environment prefiltering shader | |
 | `pcss.wgsl` | (implemented in pbr_textured.wgsl) | ✅ |
 | `contact_shadows.wgsl` | (implemented in pbr_textured.wgsl) | ✅ |
-| `gtao.wgsl` | Ground Truth AO shader | |
+| `gtao.wgsl` | (implemented inline in gtao_pass.rs) | ✅ |
 | `clustered_lighting.wgsl` | Clustered forward light loop | |
 
 ### Key Implementation Notes
@@ -800,6 +800,25 @@ API:
   app.set_contact_shadow_intensity(0.5)   // Shadow intensity (0-1)
 ```
 
+**GTAO (Ground Truth Ambient Occlusion) ✅ IMPLEMENTED**
+```
+- Horizon-based AO with ground truth visibility integral
+- More physically accurate than traditional SSAO
+- Multi-direction ray marching (2-8 directions based on quality)
+- Variable step count per direction (4-12 steps)
+- Edge-aware spatial blur for denoising
+- Configurable radius, intensity, power, and falloff
+- src/postprocessing/effects/gtao_pass.rs - GtaoPass struct
+- Inline WGSL shaders for GTAO, spatial filter, and composite
+API:
+  app.set_gtao_enabled(true)      // Enable GTAO (disables SSAO)
+  app.set_gtao_quality(1)         // 0=Low, 1=Medium, 2=High, 3=Ultra
+  app.set_gtao_radius(0.5)        // Effect radius (0.1-2.0)
+  app.set_gtao_intensity(1.5)     // Intensity (0.5-3.0)
+  app.set_gtao_power(1.5)         // Power/contrast (0.5-4.0)
+  app.set_gtao_falloff(0.2)       // Falloff start (0.0-1.0)
+```
+
 **Spherical Harmonics**
 ```
 - L2 (9 coefficients) sufficient for diffuse
@@ -826,7 +845,7 @@ API:
 | 4 | Irradiance Map (diffuse IBL) | High | Medium | ✅ Done |
 | 5 | PCSS Soft Shadows | Medium | Low | ✅ Done |
 | 6 | Contact Shadows | Medium | Low | ✅ Done |
-| 7 | GTAO | Medium | Medium | |
+| 7 | GTAO | Medium | Medium | ✅ Done |
 | 8 | Spherical Harmonics | Medium | Medium | |
 | 9 | Clustered Forward | High (many lights) | High | |
 | 10 | Auto Exposure | Low | Low | |
