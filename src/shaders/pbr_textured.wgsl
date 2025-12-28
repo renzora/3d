@@ -11,6 +11,17 @@ struct CameraUniform {
     hemisphere_sky: vec4<f32>,
     // Hemisphere light: ground.rgb = ground color, ground.w = intensity
     hemisphere_ground: vec4<f32>,
+    // IBL settings: x=diffuse intensity, y=specular intensity, z=unused, w=unused
+    ibl_settings: vec4<f32>,
+    // Scene lights (4 lights, each with position.xyz + intensity.w, color.rgb + enabled.w)
+    light0_pos: vec4<f32>,  // xyz=position, w=intensity
+    light0_color: vec4<f32>, // rgb=color, w=enabled
+    light1_pos: vec4<f32>,
+    light1_color: vec4<f32>,
+    light2_pos: vec4<f32>,
+    light2_color: vec4<f32>,
+    light3_pos: vec4<f32>,
+    light3_color: vec4<f32>,
 }
 
 struct ShadowUniform {
@@ -77,6 +88,17 @@ var shadow_sampler: sampler_comparison;
 var shadow_cube_map: texture_depth_cube;
 @group(3) @binding(10)
 var shadow_cube_sampler: sampler_comparison;
+
+// Environment map for IBL (Image-Based Lighting)
+@group(3) @binding(11)
+var env_map: texture_cube<f32>;
+@group(3) @binding(12)
+var env_sampler: sampler;
+// BRDF Look-Up Table for split-sum approximation
+@group(3) @binding(13)
+var brdf_lut: texture_2d<f32>;
+@group(3) @binding(14)
+var brdf_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -169,6 +191,77 @@ fn calculate_hemisphere_light(normal: vec3<f32>) -> vec3<f32> {
     let hemisphere_color = mix(ground_color, sky_color, blend);
 
     return hemisphere_color * intensity;
+}
+
+// Fresnel-Schlick with roughness for IBL
+fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let smooth_factor = max(vec3<f32>(1.0 - roughness), f0);
+    return f0 + (smooth_factor - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Sample environment map for IBL specular reflections
+fn sample_env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    // Use mip level based on roughness (crude approximation without prefiltered maps)
+    // For a proper implementation, we'd need a prefiltered environment map
+    let mip_level = roughness * 4.0; // Adjust based on cubemap mip levels
+    let env_color = textureSampleLevel(env_map, env_sampler, reflect_dir, mip_level).rgb;
+    return env_color;
+}
+
+// Sample environment map for IBL diffuse irradiance
+fn sample_env_diffuse(normal: vec3<f32>) -> vec3<f32> {
+    // For diffuse, sample at highest mip level (most blurred)
+    // This is a crude approximation - proper IBL uses a precomputed irradiance map
+    let mip_level = 4.0; // Use highest mip for maximum blur
+    let env_color = textureSampleLevel(env_map, env_sampler, normal, mip_level).rgb;
+    return env_color;
+}
+
+// Calculate IBL contribution (diffuse + specular) using split-sum approximation
+fn calculate_ibl(
+    normal: vec3<f32>,
+    view_dir: vec3<f32>,
+    albedo: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    ao: f32,
+    f0: vec3<f32>,
+) -> vec3<f32> {
+    // Get IBL intensity from camera uniform
+    let ibl_diffuse_intensity = camera.ibl_settings.x;
+    let ibl_specular_intensity = camera.ibl_settings.y;
+
+    let n_dot_v = max(dot(normal, view_dir), 0.001);
+
+    // Fresnel term for IBL - used for energy balance
+    let f = fresnel_schlick_roughness(n_dot_v, f0, roughness);
+
+    // Specular and diffuse weights
+    let ks = f;
+    var kd = vec3<f32>(1.0) - ks;
+    kd *= 1.0 - metallic; // Metallic surfaces have no diffuse
+
+    // IBL Diffuse - controlled by ibl_diffuse_intensity
+    let irradiance = sample_env_diffuse(normal);
+    let diffuse = irradiance * albedo * ibl_diffuse_intensity;
+
+    // IBL Specular using BRDF LUT (split-sum approximation)
+    let reflect_dir = reflect(-view_dir, normal);
+    let prefiltered_color = sample_env_specular(reflect_dir, roughness);
+
+    // Sample BRDF LUT: x = NdotV, y = roughness
+    // Returns vec2(scale, bias) for Fresnel term
+    let brdf_uv = vec2<f32>(n_dot_v, roughness);
+    let brdf = textureSample(brdf_lut, brdf_sampler, brdf_uv).rg;
+
+    // Split-sum approximation: Lo = prefilteredColor * (F0 * scale + bias)
+    // This properly integrates the BRDF over the hemisphere
+    let specular = prefiltered_color * (f0 * brdf.x + brdf.y) * ibl_specular_intensity;
+
+    // Combine diffuse and specular with AO
+    let ambient = (kd * diffuse + specular) * ao;
+
+    return ambient;
 }
 
 // Calculate shadow factor for directional/spot lights (2D shadow map)
@@ -350,8 +443,11 @@ fn calculate_shadow_light(
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample textures or use material values
     var albedo = material.base_color.rgb;
+    var alpha = material.base_color.a;
     if (material.use_albedo_map > 0.5) {
-        albedo = textureSample(albedo_texture, albedo_sampler, in.uv).rgb;
+        let albedo_sample = textureSample(albedo_texture, albedo_sampler, in.uv);
+        albedo = albedo_sample.rgb;
+        alpha = albedo_sample.a * material.base_color.a;
     }
 
     var metallic = material.metallic;
@@ -386,33 +482,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shadow-casting light (directional, spot, or point)
     lo += calculate_shadow_light(in.world_position, n, v, f0, albedo, metallic, roughness);
 
-    // Light 1 - Key light (stronger for HDR output)
-    let light1_pos = vec3<f32>(2.0, 4.0, 2.0);
-    let light1_color = vec3<f32>(1.0, 0.95, 0.9);
-    let light1_intensity = 8.0;
-    lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
-                          light1_pos, light1_color, light1_intensity);
+    // Light 0 - Key light (configurable)
+    if (camera.light0_color.w > 0.5) {
+        lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
+                              camera.light0_pos.xyz, camera.light0_color.rgb, camera.light0_pos.w);
+    }
 
-    // Light 2 - Fill light
-    let light2_pos = vec3<f32>(-3.0, 2.0, -1.0);
-    let light2_color = vec3<f32>(0.6, 0.7, 1.0);
-    let light2_intensity = 4.0;
-    lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
-                          light2_pos, light2_color, light2_intensity);
+    // Light 1 - Fill light (configurable)
+    if (camera.light1_color.w > 0.5) {
+        lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
+                              camera.light1_pos.xyz, camera.light1_color.rgb, camera.light1_pos.w);
+    }
 
-    // Light 3 - Back/rim light
-    let light3_pos = vec3<f32>(0.0, 2.0, -3.0);
-    let light3_color = vec3<f32>(0.9, 0.9, 1.0);
-    let light3_intensity = 3.0;
-    lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
-                          light3_pos, light3_color, light3_intensity);
+    // Light 2 - Rim light (configurable)
+    if (camera.light2_color.w > 0.5) {
+        lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
+                              camera.light2_pos.xyz, camera.light2_color.rgb, camera.light2_pos.w);
+    }
 
-    // Ambient lighting (flat ambient + hemisphere gradient)
-    let flat_ambient = vec3<f32>(0.08);
-    let hemisphere_ambient = calculate_hemisphere_light(n);
-    let ambient = (flat_ambient + hemisphere_ambient) * albedo * ao;
+    // Light 3 - Extra light (configurable)
+    if (camera.light3_color.w > 0.5) {
+        lo += calculate_light(in.world_position, n, v, f0, albedo, metallic, roughness,
+                              camera.light3_pos.xyz, camera.light3_color.rgb, camera.light3_pos.w);
+    }
 
-    var color = ambient + lo;
+    // IBL (Image-Based Lighting) from environment map
+    let ibl_ambient = calculate_ibl(n, v, albedo, metallic, roughness, ao, f0);
+
+    // Hemisphere light (additive, for additional ambient gradient)
+    let hemisphere_ambient = calculate_hemisphere_light(n) * albedo * ao * 0.3;
+
+    // Flat ambient to prevent dark areas (especially interiors)
+    // Higher value helps when normals face away from main lights
+    let flat_ambient = vec3<f32>(0.15) * albedo * ao;
+
+    var color = flat_ambient + hemisphere_ambient + ibl_ambient + lo;
+
+    // Alpha cutoff - discard fully transparent pixels (for decals, stickers, etc.)
+    if (alpha < 0.1) {
+        discard;
+    }
 
     // Output HDR values directly - tonemapping is done in post-processing
     // This allows values > 1.0 to trigger bloom effect

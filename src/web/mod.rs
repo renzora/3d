@@ -11,12 +11,13 @@ use bytemuck;
 use crate::core::Clock;
 use crate::math::{Color, Matrix3, Matrix4, Vector3};
 use crate::material::{TexturedPbrMaterial, TexturedPbrMaterialUniform, LineMaterial, LineModelUniform, PbrCameraUniform, PbrModelUniform};
-use crate::texture::{Texture2D, Sampler};
+use crate::texture::{BrdfLut, Texture2D, Sampler};
 use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
-use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, Pass};
+use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, Pass};
+use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
@@ -175,6 +176,11 @@ pub struct RenApp {
     hemisphere_sky_color: [f32; 3],
     hemisphere_ground_color: [f32; 3],
     hemisphere_intensity: f32,
+    // IBL intensity
+    ibl_diffuse_intensity: f32,
+    ibl_specular_intensity: f32,
+    // Scene lights (4 configurable lights)
+    lights: [[f32; 8]; 4], // Each light: [pos.x, pos.y, pos.z, intensity, color.r, color.g, color.b, enabled]
     // Shadow system
     shadow_config: ShadowConfig,
     shadows_enabled: bool,
@@ -197,6 +203,14 @@ pub struct RenApp {
     shadow_cube_map_view: wgpu::TextureView,
     shadow_cube_face_views: [wgpu::TextureView; 6],
     shadow_cube_sampler: wgpu::Sampler,
+    // Skybox
+    skybox_pass: SkyboxPass,
+    skybox_texture: CubeTexture,
+    skybox_bind_group: wgpu::BindGroup,
+    skybox_sampler: wgpu::Sampler,
+    skybox_enabled: bool,
+    // BRDF Look-Up Table for IBL
+    brdf_lut: BrdfLut,
 }
 
 #[wasm_bindgen]
@@ -313,6 +327,16 @@ impl RenApp {
             _padding: 0.0,
             hemisphere_sky: [0.6, 0.75, 1.0, 0.0],  // Disabled by default
             hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
+            ibl_settings: [0.3, 1.0, 0.0, 0.0],
+            // Car studio lighting preset
+            light0_pos: [5.0, 8.0, 5.0, 15.0],
+            light0_color: [1.0, 0.98, 0.95, 1.0],
+            light1_pos: [-5.0, 6.0, 3.0, 10.0],
+            light1_color: [0.9, 0.95, 1.0, 1.0],
+            light2_pos: [0.0, 4.0, -6.0, 8.0],
+            light2_color: [1.0, 1.0, 1.0, 1.0],
+            light3_pos: [-3.0, 1.0, -3.0, 5.0],
+            light3_color: [0.8, 0.85, 0.9, 1.0],
         };
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -593,6 +617,36 @@ impl RenApp {
             ..Default::default()
         });
 
+        // ========== Skybox Setup ==========
+        // Create skybox pass (must match scene texture format)
+        let skybox_pass = SkyboxPass::new(&device, surface_format);
+
+        // Create default procedural sky cubemap
+        let skybox_texture = CubeTexture::default_sky(&device, &queue);
+
+        // Create skybox sampler (linear filtering for smooth gradients)
+        let skybox_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Skybox Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Create skybox texture bind group
+        let skybox_bind_group = skybox_pass.create_texture_bind_group(
+            &device,
+            skybox_texture.view(),
+            &skybox_sampler,
+        );
+
+        // ========== BRDF LUT Setup ==========
+        // Generate BRDF Look-Up Table for proper IBL split-sum approximation
+        let brdf_lut = BrdfLut::new(&device, &queue);
+
         // Create shadow uniform buffer
         let shadow_uniform = WebShadowUniform::default();
         let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -776,6 +830,16 @@ impl RenApp {
             hemisphere_sky_color: [0.6, 0.75, 1.0],
             hemisphere_ground_color: [0.4, 0.3, 0.2],
             hemisphere_intensity: 1.0,
+            // IBL intensity
+            ibl_diffuse_intensity: 0.3,
+            ibl_specular_intensity: 1.0,
+            // Scene lights - car studio preset
+            lights: [
+                [5.0, 8.0, 5.0, 15.0, 1.0, 0.98, 0.95, 1.0],     // Key light: warm white
+                [-5.0, 6.0, 3.0, 10.0, 0.9, 0.95, 1.0, 1.0],     // Fill light: cool white
+                [0.0, 4.0, -6.0, 8.0, 1.0, 1.0, 1.0, 1.0],       // Rim light: pure white
+                [-3.0, 1.0, -3.0, 5.0, 0.8, 0.85, 0.9, 1.0],     // Ground bounce: slight blue
+            ],
             // Shadow system
             shadow_config,
             shadows_enabled: false,
@@ -796,6 +860,12 @@ impl RenApp {
             shadow_cube_map_view,
             shadow_cube_face_views,
             shadow_cube_sampler,
+            skybox_pass,
+            skybox_texture,
+            skybox_bind_group,
+            skybox_sampler,
+            skybox_enabled: true,
+            brdf_lut,
         })
     }
 
@@ -894,6 +964,20 @@ impl RenApp {
                     self.hemisphere_ground_color[2],
                     self.hemisphere_intensity,
                 ],
+                ibl_settings: [
+                    self.ibl_diffuse_intensity,
+                    self.ibl_specular_intensity,
+                    0.0,
+                    0.0,
+                ],
+                light0_pos: [self.lights[0][0], self.lights[0][1], self.lights[0][2], self.lights[0][3]],
+                light0_color: [self.lights[0][4], self.lights[0][5], self.lights[0][6], self.lights[0][7]],
+                light1_pos: [self.lights[1][0], self.lights[1][1], self.lights[1][2], self.lights[1][3]],
+                light1_color: [self.lights[1][4], self.lights[1][5], self.lights[1][6], self.lights[1][7]],
+                light2_pos: [self.lights[2][0], self.lights[2][1], self.lights[2][2], self.lights[2][3]],
+                light2_color: [self.lights[2][4], self.lights[2][5], self.lights[2][6], self.lights[2][7]],
+                light3_pos: [self.lights[3][0], self.lights[3][1], self.lights[3][2], self.lights[3][3]],
+                light3_color: [self.lights[3][4], self.lights[3][5], self.lights[3][6], self.lights[3][7]],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
@@ -921,6 +1005,12 @@ impl RenApp {
             // Update outline camera planes
             if self.outline.enabled() {
                 self.outline.set_camera_planes(camera.near, camera.far);
+            }
+
+            // Update skybox uniform (needs inverse view-proj for world direction)
+            if self.skybox_enabled {
+                let inv_view_proj = matrix4_to_array(&camera.view_projection_matrix().inverse());
+                self.skybox_pass.update_uniform(&self.queue, inv_view_proj);
             }
         }
 
@@ -1214,6 +1304,11 @@ impl RenApp {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Render skybox first (at far depth, behind everything)
+            if self.skybox_enabled {
+                self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
+            }
 
             // Render PBR meshes
             if let Some(pipeline) = self.material.pipeline() {
@@ -1510,6 +1605,20 @@ impl RenApp {
                     self.hemisphere_ground_color[2],
                     self.hemisphere_intensity,
                 ],
+                ibl_settings: [
+                    self.ibl_diffuse_intensity,
+                    self.ibl_specular_intensity,
+                    0.0,
+                    0.0,
+                ],
+                light0_pos: [self.lights[0][0], self.lights[0][1], self.lights[0][2], self.lights[0][3]],
+                light0_color: [self.lights[0][4], self.lights[0][5], self.lights[0][6], self.lights[0][7]],
+                light1_pos: [self.lights[1][0], self.lights[1][1], self.lights[1][2], self.lights[1][3]],
+                light1_color: [self.lights[1][4], self.lights[1][5], self.lights[1][6], self.lights[1][7]],
+                light2_pos: [self.lights[2][0], self.lights[2][1], self.lights[2][2], self.lights[2][3]],
+                light2_color: [self.lights[2][4], self.lights[2][5], self.lights[2][6], self.lights[2][7]],
+                light3_pos: [self.lights[3][0], self.lights[3][1], self.lights[3][2], self.lights[3][3]],
+                light3_color: [self.lights[3][4], self.lights[3][5], self.lights[3][6], self.lights[3][7]],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
         }
@@ -1724,7 +1833,7 @@ impl RenApp {
                 .and_then(|n| gpu_textures.get(n))
                 .unwrap_or(&self.white_texture);
 
-            // Create combined texture + shadow bind group
+            // Create combined texture + shadow + env + BRDF bind group
             let texture_bind_group = self.material
                 .create_texture_shadow_bind_group(
                     &self.device,
@@ -1739,6 +1848,10 @@ impl RenApp {
                     &self.shadow_sampler,
                     &self.shadow_cube_map_view,
                     &self.shadow_cube_sampler,
+                    self.skybox_texture.view(),
+                    &self.skybox_sampler,
+                    self.brdf_lut.view(),
+                    self.brdf_lut.sampler(),
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -1933,6 +2046,94 @@ impl RenApp {
             _ => SsaoQuality::Ultra,
         };
         self.ssao.set_quality(q);
+    }
+
+    /// Set SSAO bias to prevent self-occlusion artifacts.
+    #[wasm_bindgen]
+    pub fn set_ssao_bias(&mut self, bias: f32) {
+        self.ssao.set_bias(bias);
+    }
+
+    /// Set IBL diffuse intensity (environment lighting).
+    #[wasm_bindgen]
+    pub fn set_ibl_diffuse_intensity(&mut self, intensity: f32) {
+        self.ibl_diffuse_intensity = intensity;
+        // TODO: Update shader uniform when IBL uniforms are implemented
+    }
+
+    /// Set IBL specular intensity (environment reflections).
+    #[wasm_bindgen]
+    pub fn set_ibl_specular_intensity(&mut self, intensity: f32) {
+        self.ibl_specular_intensity = intensity;
+    }
+
+    /// Set light position (index 0-3).
+    #[wasm_bindgen]
+    pub fn set_light_position(&mut self, index: usize, x: f32, y: f32, z: f32) {
+        if index < 4 {
+            self.lights[index][0] = x;
+            self.lights[index][1] = y;
+            self.lights[index][2] = z;
+        }
+    }
+
+    /// Set light intensity (index 0-3).
+    #[wasm_bindgen]
+    pub fn set_light_intensity(&mut self, index: usize, intensity: f32) {
+        if index < 4 {
+            self.lights[index][3] = intensity;
+        }
+    }
+
+    /// Set light color (index 0-3).
+    #[wasm_bindgen]
+    pub fn set_light_color(&mut self, index: usize, r: f32, g: f32, b: f32) {
+        if index < 4 {
+            self.lights[index][4] = r;
+            self.lights[index][5] = g;
+            self.lights[index][6] = b;
+        }
+    }
+
+    /// Enable or disable a light (index 0-3).
+    #[wasm_bindgen]
+    pub fn set_light_enabled(&mut self, index: usize, enabled: bool) {
+        if index < 4 {
+            self.lights[index][7] = if enabled { 1.0 } else { 0.0 };
+        }
+    }
+
+    /// Apply car studio lighting preset.
+    #[wasm_bindgen]
+    pub fn apply_car_studio_preset(&mut self) {
+        self.lights = [
+            [5.0, 8.0, 5.0, 15.0, 1.0, 0.98, 0.95, 1.0],     // Key light
+            [-5.0, 6.0, 3.0, 10.0, 0.9, 0.95, 1.0, 1.0],     // Fill light
+            [0.0, 4.0, -6.0, 8.0, 1.0, 1.0, 1.0, 1.0],       // Rim light
+            [-3.0, 1.0, -3.0, 5.0, 0.8, 0.85, 0.9, 1.0],     // Ground bounce
+        ];
+    }
+
+    /// Apply outdoor lighting preset.
+    #[wasm_bindgen]
+    pub fn apply_outdoor_preset(&mut self) {
+        self.lights = [
+            [10.0, 20.0, 10.0, 25.0, 1.0, 0.95, 0.85, 1.0],  // Sun
+            [-5.0, 5.0, 5.0, 5.0, 0.7, 0.8, 1.0, 1.0],       // Sky fill
+            [0.0, 2.0, 0.0, 3.0, 0.6, 0.5, 0.4, 1.0],        // Ground reflection
+            [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0],        // Disabled
+        ];
+    }
+
+    /// Apply dramatic lighting preset.
+    #[wasm_bindgen]
+    pub fn apply_dramatic_preset(&mut self) {
+        self.lights = [
+            [3.0, 5.0, 0.0, 20.0, 1.0, 0.9, 0.8, 1.0],       // Strong side key
+            [-8.0, 3.0, -2.0, 4.0, 0.4, 0.5, 0.7, 1.0],      // Subtle fill
+            [-2.0, 6.0, -5.0, 12.0, 1.0, 1.0, 1.0, 1.0],     // Strong rim
+            [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0],        // Disabled
+        ];
     }
 
     /// Enable or disable vignette effect.
@@ -2226,6 +2427,48 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn get_hemisphere_intensity(&self) -> f32 {
         self.hemisphere_intensity
+    }
+
+    // ========== Skybox ==========
+
+    /// Enable or disable skybox.
+    #[wasm_bindgen]
+    pub fn set_skybox_enabled(&mut self, enabled: bool) {
+        self.skybox_enabled = enabled;
+    }
+
+    /// Check if skybox is enabled.
+    #[wasm_bindgen]
+    pub fn is_skybox_enabled(&self) -> bool {
+        self.skybox_enabled
+    }
+
+    /// Set skybox exposure (brightness multiplier).
+    #[wasm_bindgen]
+    pub fn set_skybox_exposure(&mut self, exposure: f32) {
+        self.skybox_pass.set_exposure(exposure);
+    }
+
+    /// Set procedural sky colors (RGB, 0-255).
+    /// Creates a new procedural sky cubemap with the given colors.
+    #[wasm_bindgen]
+    pub fn set_sky_colors(&mut self, sky_r: u8, sky_g: u8, sky_b: u8, horizon_r: u8, horizon_g: u8, horizon_b: u8, ground_r: u8, ground_g: u8, ground_b: u8) {
+        // Create new procedural sky with custom colors
+        self.skybox_texture = CubeTexture::procedural_sky(
+            &self.device,
+            &self.queue,
+            64,
+            [sky_r, sky_g, sky_b],
+            [horizon_r, horizon_g, horizon_b],
+            [ground_r, ground_g, ground_b],
+        );
+
+        // Update bind group with new texture
+        self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
+            &self.device,
+            self.skybox_texture.view(),
+            &self.skybox_sampler,
+        );
     }
 
     // ========== Shadows ==========
@@ -2574,7 +2817,7 @@ impl RenApp {
             _padding: [0.0; 2],
         };
 
-        // Create combined texture + shadow bind group with default textures
+        // Create combined texture + shadow + env + BRDF bind group with default textures
         let texture_bind_group = self.material
             .create_texture_shadow_bind_group(
                 &self.device,
@@ -2589,6 +2832,10 @@ impl RenApp {
                 &self.shadow_sampler,
                 &self.shadow_cube_map_view,
                 &self.shadow_cube_sampler,
+                self.skybox_texture.view(),
+                &self.skybox_sampler,
+                self.brdf_lut.view(),
+                self.brdf_lut.sampler(),
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 

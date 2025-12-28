@@ -152,6 +152,11 @@ impl SsaoPass {
         self.settings.intensity = intensity.max(0.0);
     }
 
+    /// Set bias to prevent self-occlusion artifacts.
+    pub fn set_bias(&mut self, bias: f32) {
+        self.settings.bias = bias.max(0.0);
+    }
+
     /// Update projection matrices (call before render).
     pub fn set_projection(&mut self, projection: [[f32; 4]; 4], inv_projection: [[f32; 4]; 4], near: f32, far: f32) {
         self.projection = projection;

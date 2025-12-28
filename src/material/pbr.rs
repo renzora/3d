@@ -19,6 +19,24 @@ pub struct PbrCameraUniform {
     pub hemisphere_sky: [f32; 4],
     /// Hemisphere light ground color (RGB) + intensity (W).
     pub hemisphere_ground: [f32; 4],
+    /// IBL settings: x=diffuse intensity, y=specular intensity, z=unused, w=unused.
+    pub ibl_settings: [f32; 4],
+    /// Light 0: position.xyz + intensity.w
+    pub light0_pos: [f32; 4],
+    /// Light 0: color.rgb + enabled.w
+    pub light0_color: [f32; 4],
+    /// Light 1: position.xyz + intensity.w
+    pub light1_pos: [f32; 4],
+    /// Light 1: color.rgb + enabled.w
+    pub light1_color: [f32; 4],
+    /// Light 2: position.xyz + intensity.w
+    pub light2_pos: [f32; 4],
+    /// Light 2: color.rgb + enabled.w
+    pub light2_color: [f32; 4],
+    /// Light 3: position.xyz + intensity.w
+    pub light3_pos: [f32; 4],
+    /// Light 3: color.rgb + enabled.w
+    pub light3_color: [f32; 4],
 }
 
 impl Default for PbrCameraUniform {
@@ -29,6 +47,16 @@ impl Default for PbrCameraUniform {
             _padding: 0.0,
             hemisphere_sky: [0.6, 0.75, 1.0, 0.0],
             hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
+            ibl_settings: [0.3, 1.0, 0.0, 0.0],
+            // Car studio lighting preset
+            light0_pos: [5.0, 8.0, 5.0, 15.0],      // Key light: front-right, high, intensity 15
+            light0_color: [1.0, 0.98, 0.95, 1.0],   // Warm white, enabled
+            light1_pos: [-5.0, 6.0, 3.0, 10.0],     // Fill light: front-left, intensity 10
+            light1_color: [0.9, 0.95, 1.0, 1.0],    // Cool white, enabled
+            light2_pos: [0.0, 4.0, -6.0, 8.0],      // Rim light: behind, intensity 8
+            light2_color: [1.0, 1.0, 1.0, 1.0],     // Pure white, enabled
+            light3_pos: [-3.0, 1.0, -3.0, 5.0],     // Ground bounce: low, back-left, intensity 5
+            light3_color: [0.8, 0.85, 0.9, 1.0],    // Slight blue, enabled
         }
     }
 }

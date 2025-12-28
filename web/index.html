@@ -332,6 +332,31 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>Skybox</h3>
+                <label>
+                    <input type="checkbox" id="skybox-enabled" checked>
+                    Enable
+                </label>
+                <label>
+                    Exposure
+                    <input type="range" id="skybox-exposure" min="0.1" max="3" step="0.1" value="1.0">
+                    <span class="value" id="skybox-exposure-val">1.0</span>
+                </label>
+                <label>
+                    Sky Color
+                    <input type="color" id="skybox-sky-color" value="#6496e6">
+                </label>
+                <label>
+                    Horizon Color
+                    <input type="color" id="skybox-horizon-color" value="#c8d2dc">
+                </label>
+                <label>
+                    Ground Color
+                    <input type="color" id="skybox-ground-color" value="#322d28">
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>Shadows</h3>
                 <label>
                     <input type="checkbox" id="shadows-enabled" checked>
@@ -629,6 +654,67 @@
                     <input type="range" id="ssao-intensity" min="0" max="3" step="0.1" value="1.0">
                     <span class="value" id="ssao-intensity-val">1.0</span>
                 </label>
+                <label>
+                    Bias
+                    <input type="range" id="ssao-bias" min="0" max="0.1" step="0.005" value="0.025">
+                    <span class="value" id="ssao-bias-val">0.025</span>
+                </label>
+                <button id="ssao-reset" style="margin-top: 5px; padding: 5px 10px; background: #444; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Reset SSAO</button>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>IBL (Environment Lighting)</h3>
+                <label>
+                    Diffuse
+                    <input type="range" id="ibl-diffuse" min="0" max="2" step="0.1" value="0.3">
+                    <span class="value" id="ibl-diffuse-val">0.3</span>
+                </label>
+                <label>
+                    Specular
+                    <input type="range" id="ibl-specular" min="0" max="2" step="0.1" value="1.0">
+                    <span class="value" id="ibl-specular-val">1.0</span>
+                </label>
+                <button id="ibl-reset" style="margin-top: 5px; padding: 5px 10px; background: #444; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Reset IBL</button>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Scene Lights</h3>
+                <label>
+                    Preset
+                    <select id="light-preset">
+                        <option value="studio" selected>Car Studio</option>
+                        <option value="outdoor">Outdoor</option>
+                        <option value="dramatic">Dramatic</option>
+                    </select>
+                </label>
+                <div style="margin-top: 10px; font-size: 11px; color: #aaa;">Key Light</div>
+                <label><input type="checkbox" id="light0-enabled" checked> Enable</label>
+                <label>Intensity <input type="range" id="light0-intensity" min="0" max="30" step="1" value="15"><span class="value" id="light0-intensity-val">15</span></label>
+                <label>Color <input type="color" id="light0-color" value="#fffaf2"></label>
+                <label>X <input type="range" id="light0-x" min="-15" max="15" step="0.5" value="5"><span class="value" id="light0-x-val">5</span></label>
+                <label>Y <input type="range" id="light0-y" min="0" max="20" step="0.5" value="8"><span class="value" id="light0-y-val">8</span></label>
+                <label>Z <input type="range" id="light0-z" min="-15" max="15" step="0.5" value="5"><span class="value" id="light0-z-val">5</span></label>
+                <div style="margin-top: 10px; font-size: 11px; color: #aaa;">Fill Light</div>
+                <label><input type="checkbox" id="light1-enabled" checked> Enable</label>
+                <label>Intensity <input type="range" id="light1-intensity" min="0" max="30" step="1" value="10"><span class="value" id="light1-intensity-val">10</span></label>
+                <label>Color <input type="color" id="light1-color" value="#e6f2ff"></label>
+                <label>X <input type="range" id="light1-x" min="-15" max="15" step="0.5" value="-5"><span class="value" id="light1-x-val">-5</span></label>
+                <label>Y <input type="range" id="light1-y" min="0" max="20" step="0.5" value="6"><span class="value" id="light1-y-val">6</span></label>
+                <label>Z <input type="range" id="light1-z" min="-15" max="15" step="0.5" value="3"><span class="value" id="light1-z-val">3</span></label>
+                <div style="margin-top: 10px; font-size: 11px; color: #aaa;">Rim Light</div>
+                <label><input type="checkbox" id="light2-enabled" checked> Enable</label>
+                <label>Intensity <input type="range" id="light2-intensity" min="0" max="30" step="1" value="8"><span class="value" id="light2-intensity-val">8</span></label>
+                <label>Color <input type="color" id="light2-color" value="#ffffff"></label>
+                <label>X <input type="range" id="light2-x" min="-15" max="15" step="0.5" value="0"><span class="value" id="light2-x-val">0</span></label>
+                <label>Y <input type="range" id="light2-y" min="0" max="20" step="0.5" value="4"><span class="value" id="light2-y-val">4</span></label>
+                <label>Z <input type="range" id="light2-z" min="-15" max="15" step="0.5" value="-6"><span class="value" id="light2-z-val">-6</span></label>
+                <div style="margin-top: 10px; font-size: 11px; color: #aaa;">Bounce Light</div>
+                <label><input type="checkbox" id="light3-enabled" checked> Enable</label>
+                <label>Intensity <input type="range" id="light3-intensity" min="0" max="30" step="1" value="5"><span class="value" id="light3-intensity-val">5</span></label>
+                <label>Color <input type="color" id="light3-color" value="#ccd9e6"></label>
+                <label>X <input type="range" id="light3-x" min="-15" max="15" step="0.5" value="-3"><span class="value" id="light3-x-val">-3</span></label>
+                <label>Y <input type="range" id="light3-y" min="0" max="20" step="0.5" value="1"><span class="value" id="light3-y-val">1</span></label>
+                <label>Z <input type="range" id="light3-z" min="-15" max="15" step="0.5" value="-3"><span class="value" id="light3-z-val">-3</span></label>
             </div>
             <hr class="divider">
             <div class="section">
@@ -1156,6 +1242,416 @@
                     const val = parseFloat(e.target.value);
                     app.set_hemisphere_intensity(val);
                     document.getElementById('hemisphere-intensity-val').textContent = val.toFixed(1);
+                });
+
+                // Skybox controls
+                document.getElementById('skybox-enabled').addEventListener('change', (e) => {
+                    app.set_skybox_enabled(e.target.checked);
+                });
+                document.getElementById('skybox-exposure').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_skybox_exposure(val);
+                    document.getElementById('skybox-exposure-val').textContent = val.toFixed(1);
+                });
+
+                // Helper to convert hex color to RGB
+                const hexToRgb = (hex) => {
+                    const r = parseInt(hex.slice(1, 3), 16);
+                    const g = parseInt(hex.slice(3, 5), 16);
+                    const b = parseInt(hex.slice(5, 7), 16);
+                    return [r, g, b];
+                };
+
+                const updateSkyColors = () => {
+                    const sky = hexToRgb(document.getElementById('skybox-sky-color').value);
+                    const horizon = hexToRgb(document.getElementById('skybox-horizon-color').value);
+                    const ground = hexToRgb(document.getElementById('skybox-ground-color').value);
+                    app.set_sky_colors(sky[0], sky[1], sky[2], horizon[0], horizon[1], horizon[2], ground[0], ground[1], ground[2]);
+                };
+
+                document.getElementById('skybox-sky-color').addEventListener('input', updateSkyColors);
+                document.getElementById('skybox-horizon-color').addEventListener('input', updateSkyColors);
+                document.getElementById('skybox-ground-color').addEventListener('input', updateSkyColors);
+
+                // SSAO bias control
+                document.getElementById('ssao-bias').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_ssao_bias) app.set_ssao_bias(val);
+                    document.getElementById('ssao-bias-val').textContent = val.toFixed(3);
+                    saveSettings();
+                });
+
+                // SSAO reset
+                document.getElementById('ssao-reset').addEventListener('click', () => {
+                    document.getElementById('ssao-enabled').checked = true;
+                    document.getElementById('ssao-quality').value = '1';
+                    document.getElementById('ssao-radius').value = 0.5;
+                    document.getElementById('ssao-radius-val').textContent = '0.5';
+                    document.getElementById('ssao-intensity').value = 1.0;
+                    document.getElementById('ssao-intensity-val').textContent = '1.0';
+                    document.getElementById('ssao-bias').value = 0.025;
+                    document.getElementById('ssao-bias-val').textContent = '0.025';
+                    app.set_ssao_enabled(true);
+                    app.set_ssao_quality(1);
+                    app.set_ssao_radius(0.5);
+                    app.set_ssao_intensity(1.0);
+                    if (app.set_ssao_bias) app.set_ssao_bias(0.025);
+                    saveSettings();
+                });
+
+                // IBL controls
+                document.getElementById('ibl-diffuse').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(val);
+                    document.getElementById('ibl-diffuse-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('ibl-specular').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(val);
+                    document.getElementById('ibl-specular-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('ibl-reset').addEventListener('click', () => {
+                    document.getElementById('ibl-diffuse').value = 0.3;
+                    document.getElementById('ibl-diffuse-val').textContent = '0.3';
+                    document.getElementById('ibl-specular').value = 1.0;
+                    document.getElementById('ibl-specular-val').textContent = '1.0';
+                    if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(0.3);
+                    if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(1.0);
+                    saveSettings();
+                });
+
+                // ============ Scene Lights ============
+                function setupLightControls(index) {
+                    const prefix = `light${index}`;
+
+                    document.getElementById(`${prefix}-enabled`).addEventListener('change', (e) => {
+                        if (app.set_light_enabled) app.set_light_enabled(index, e.target.checked);
+                        saveSettings();
+                    });
+
+                    document.getElementById(`${prefix}-intensity`).addEventListener('input', (e) => {
+                        const val = parseFloat(e.target.value);
+                        document.getElementById(`${prefix}-intensity-val`).textContent = val;
+                        if (app.set_light_intensity) app.set_light_intensity(index, val);
+                        saveSettings();
+                    });
+
+                    document.getElementById(`${prefix}-color`).addEventListener('input', (e) => {
+                        const rgb = hexToRgb(e.target.value);
+                        if (app.set_light_color) app.set_light_color(index, rgb.r, rgb.g, rgb.b);
+                        saveSettings();
+                    });
+
+                    ['x', 'y', 'z'].forEach(axis => {
+                        document.getElementById(`${prefix}-${axis}`).addEventListener('input', (e) => {
+                            const val = parseFloat(e.target.value);
+                            document.getElementById(`${prefix}-${axis}-val`).textContent = val;
+                            const x = parseFloat(document.getElementById(`${prefix}-x`).value);
+                            const y = parseFloat(document.getElementById(`${prefix}-y`).value);
+                            const z = parseFloat(document.getElementById(`${prefix}-z`).value);
+                            if (app.set_light_position) app.set_light_position(index, x, y, z);
+                            saveSettings();
+                        });
+                    });
+                }
+
+                // Setup controls for all 4 lights
+                for (let i = 0; i < 4; i++) {
+                    setupLightControls(i);
+                }
+
+                // Light preset selector
+                document.getElementById('light-preset').addEventListener('change', (e) => {
+                    const preset = e.target.value;
+                    if (preset === 'studio' && app.apply_car_studio_preset) {
+                        app.apply_car_studio_preset();
+                        updateLightUI([
+                            { x: 5, y: 8, z: 5, intensity: 15, color: '#fffaf2', enabled: true },
+                            { x: -5, y: 6, z: 3, intensity: 10, color: '#e6f2ff', enabled: true },
+                            { x: 0, y: 4, z: -6, intensity: 8, color: '#ffffff', enabled: true },
+                            { x: -3, y: 1, z: -3, intensity: 5, color: '#ccd9e6', enabled: true }
+                        ]);
+                    } else if (preset === 'outdoor' && app.apply_outdoor_preset) {
+                        app.apply_outdoor_preset();
+                        updateLightUI([
+                            { x: 10, y: 20, z: 10, intensity: 25, color: '#fff2d9', enabled: true },
+                            { x: -5, y: 5, z: 5, intensity: 5, color: '#b3ccff', enabled: true },
+                            { x: 0, y: 2, z: 0, intensity: 3, color: '#998066', enabled: true },
+                            { x: 0, y: 0, z: 0, intensity: 0, color: '#ffffff', enabled: false }
+                        ]);
+                    } else if (preset === 'dramatic' && app.apply_dramatic_preset) {
+                        app.apply_dramatic_preset();
+                        updateLightUI([
+                            { x: 3, y: 5, z: 0, intensity: 20, color: '#ffe6cc', enabled: true },
+                            { x: -8, y: 3, z: -2, intensity: 4, color: '#6680b3', enabled: true },
+                            { x: -2, y: 6, z: -5, intensity: 12, color: '#ffffff', enabled: true },
+                            { x: 0, y: 0, z: 0, intensity: 0, color: '#ffffff', enabled: false }
+                        ]);
+                    }
+                    saveSettings();
+                });
+
+                function updateLightUI(lights) {
+                    lights.forEach((light, i) => {
+                        document.getElementById(`light${i}-enabled`).checked = light.enabled;
+                        document.getElementById(`light${i}-intensity`).value = light.intensity;
+                        document.getElementById(`light${i}-intensity-val`).textContent = light.intensity;
+                        document.getElementById(`light${i}-color`).value = light.color;
+                        document.getElementById(`light${i}-x`).value = light.x;
+                        document.getElementById(`light${i}-x-val`).textContent = light.x;
+                        document.getElementById(`light${i}-y`).value = light.y;
+                        document.getElementById(`light${i}-y-val`).textContent = light.y;
+                        document.getElementById(`light${i}-z`).value = light.z;
+                        document.getElementById(`light${i}-z-val`).textContent = light.z;
+                    });
+                }
+
+                // ============ LocalStorage Persistence ============
+                const STORAGE_KEY = 'ren-engine-settings';
+
+                function saveSettings() {
+                    const settings = {
+                        // Bloom
+                        bloomEnabled: document.getElementById('bloom-enabled').checked,
+                        bloomIntensity: document.getElementById('bloom-intensity').value,
+                        bloomThreshold: document.getElementById('bloom-threshold').value,
+                        exposure: document.getElementById('exposure').value,
+                        // Vignette
+                        vignetteEnabled: document.getElementById('vignette-enabled').checked,
+                        vignetteIntensity: document.getElementById('vignette-intensity').value,
+                        vignetteSmoothness: document.getElementById('vignette-smoothness').value,
+                        vignetteRoundness: document.getElementById('vignette-roundness').value,
+                        // Color Correction
+                        ccEnabled: document.getElementById('cc-enabled').checked,
+                        ccBrightness: document.getElementById('cc-brightness').value,
+                        ccContrast: document.getElementById('cc-contrast').value,
+                        ccSaturation: document.getElementById('cc-saturation').value,
+                        ccGamma: document.getElementById('cc-gamma').value,
+                        ccTemperature: document.getElementById('cc-temperature').value,
+                        ccTint: document.getElementById('cc-tint').value,
+                        // Hemisphere
+                        hemisphereEnabled: document.getElementById('hemisphere-enabled').checked,
+                        hemisphereSkyColor: document.getElementById('hemisphere-sky-color').value,
+                        hemisphereGroundColor: document.getElementById('hemisphere-ground-color').value,
+                        hemisphereIntensity: document.getElementById('hemisphere-intensity').value,
+                        // Skybox
+                        skyboxEnabled: document.getElementById('skybox-enabled').checked,
+                        skyboxExposure: document.getElementById('skybox-exposure').value,
+                        skyboxSkyColor: document.getElementById('skybox-sky-color').value,
+                        skyboxHorizonColor: document.getElementById('skybox-horizon-color').value,
+                        skyboxGroundColor: document.getElementById('skybox-ground-color').value,
+                        // Shadows
+                        shadowsEnabled: document.getElementById('shadows-enabled').checked,
+                        shadowResolution: document.getElementById('shadow-resolution').value,
+                        shadowPcf: document.getElementById('shadow-pcf').value,
+                        shadowBias: document.getElementById('shadow-bias').value,
+                        shadowNormalBias: document.getElementById('shadow-normal-bias').value,
+                        // SSAO
+                        ssaoEnabled: document.getElementById('ssao-enabled').checked,
+                        ssaoQuality: document.getElementById('ssao-quality').value,
+                        ssaoRadius: document.getElementById('ssao-radius').value,
+                        ssaoIntensity: document.getElementById('ssao-intensity').value,
+                        ssaoBias: document.getElementById('ssao-bias').value,
+                        // IBL
+                        iblDiffuse: document.getElementById('ibl-diffuse').value,
+                        iblSpecular: document.getElementById('ibl-specular').value,
+                        // AA
+                        aaMode: document.getElementById('aa-mode').value,
+                        fxaaQuality: document.getElementById('fxaa-quality').value,
+                        smaaQuality: document.getElementById('smaa-quality').value,
+                        taaBlend: document.getElementById('taa-blend').value,
+                        taaSharpness: document.getElementById('taa-sharpness').value,
+                        // DoF
+                        dofEnabled: document.getElementById('dof-enabled').checked,
+                        dofQuality: document.getElementById('dof-quality').value,
+                        dofFocalDistance: document.getElementById('dof-focal-distance').value,
+                        dofFocalRange: document.getElementById('dof-focal-range').value,
+                        dofBlurStrength: document.getElementById('dof-blur-strength').value,
+                        // SSR
+                        ssrEnabled: document.getElementById('ssr-enabled').checked,
+                        ssrQuality: document.getElementById('ssr-quality').value,
+                        ssrMaxDistance: document.getElementById('ssr-max-distance').value,
+                        ssrThickness: document.getElementById('ssr-thickness').value,
+                        ssrIntensity: document.getElementById('ssr-intensity').value,
+                        // Motion Blur
+                        motionBlurEnabled: document.getElementById('motion-blur-enabled').checked,
+                        motionBlurQuality: document.getElementById('motion-blur-quality').value,
+                        motionBlurIntensity: document.getElementById('motion-blur-intensity').value,
+                        motionBlurMax: document.getElementById('motion-blur-max').value,
+                        motionBlurVelocity: document.getElementById('motion-blur-velocity').value,
+                        // Outline
+                        outlineEnabled: document.getElementById('outline-enabled').checked,
+                        outlineMode: document.getElementById('outline-mode').value,
+                        outlineThickness: document.getElementById('outline-thickness').value,
+                        outlineDepth: document.getElementById('outline-depth').value,
+                        outlineNormal: document.getElementById('outline-normal').value,
+                        outlineColor: document.getElementById('outline-color').value,
+                        // Helpers
+                        showGrid: document.getElementById('show-grid').checked,
+                        showAxes: document.getElementById('show-axes').checked,
+                    };
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+                }
+
+                function loadSettings() {
+                    const saved = localStorage.getItem(STORAGE_KEY);
+                    if (!saved) return;
+
+                    try {
+                        const s = JSON.parse(saved);
+
+                        // Helper to set value and trigger update
+                        const setVal = (id, val, valId) => {
+                            const el = document.getElementById(id);
+                            if (el && val !== undefined) {
+                                if (el.type === 'checkbox') el.checked = val;
+                                else el.value = val;
+                                if (valId) document.getElementById(valId).textContent = parseFloat(val).toFixed(2);
+                            }
+                        };
+
+                        // Apply saved settings to UI
+                        setVal('bloom-enabled', s.bloomEnabled);
+                        setVal('bloom-intensity', s.bloomIntensity, 'bloom-intensity-val');
+                        setVal('bloom-threshold', s.bloomThreshold, 'bloom-threshold-val');
+                        setVal('exposure', s.exposure, 'exposure-val');
+                        setVal('vignette-enabled', s.vignetteEnabled);
+                        setVal('vignette-intensity', s.vignetteIntensity, 'vignette-intensity-val');
+                        setVal('vignette-smoothness', s.vignetteSmoothness, 'vignette-smoothness-val');
+                        setVal('vignette-roundness', s.vignetteRoundness, 'vignette-roundness-val');
+                        setVal('cc-enabled', s.ccEnabled);
+                        setVal('cc-brightness', s.ccBrightness, 'cc-brightness-val');
+                        setVal('cc-contrast', s.ccContrast, 'cc-contrast-val');
+                        setVal('cc-saturation', s.ccSaturation, 'cc-saturation-val');
+                        setVal('cc-gamma', s.ccGamma, 'cc-gamma-val');
+                        setVal('cc-temperature', s.ccTemperature, 'cc-temperature-val');
+                        setVal('cc-tint', s.ccTint, 'cc-tint-val');
+                        setVal('hemisphere-enabled', s.hemisphereEnabled);
+                        setVal('hemisphere-sky-color', s.hemisphereSkyColor);
+                        setVal('hemisphere-ground-color', s.hemisphereGroundColor);
+                        setVal('hemisphere-intensity', s.hemisphereIntensity, 'hemisphere-intensity-val');
+                        setVal('skybox-enabled', s.skyboxEnabled);
+                        setVal('skybox-exposure', s.skyboxExposure, 'skybox-exposure-val');
+                        setVal('skybox-sky-color', s.skyboxSkyColor);
+                        setVal('skybox-horizon-color', s.skyboxHorizonColor);
+                        setVal('skybox-ground-color', s.skyboxGroundColor);
+                        setVal('shadows-enabled', s.shadowsEnabled);
+                        setVal('shadow-resolution', s.shadowResolution);
+                        setVal('shadow-pcf', s.shadowPcf);
+                        setVal('shadow-bias', s.shadowBias, 'shadow-bias-val');
+                        setVal('shadow-normal-bias', s.shadowNormalBias, 'shadow-normal-bias-val');
+                        setVal('ssao-enabled', s.ssaoEnabled);
+                        setVal('ssao-quality', s.ssaoQuality);
+                        setVal('ssao-radius', s.ssaoRadius, 'ssao-radius-val');
+                        setVal('ssao-intensity', s.ssaoIntensity, 'ssao-intensity-val');
+                        setVal('ssao-bias', s.ssaoBias, 'ssao-bias-val');
+                        setVal('ibl-diffuse', s.iblDiffuse, 'ibl-diffuse-val');
+                        setVal('ibl-specular', s.iblSpecular, 'ibl-specular-val');
+                        setVal('aa-mode', s.aaMode);
+                        setVal('fxaa-quality', s.fxaaQuality);
+                        setVal('smaa-quality', s.smaaQuality);
+                        setVal('taa-blend', s.taaBlend, 'taa-blend-val');
+                        setVal('taa-sharpness', s.taaSharpness, 'taa-sharpness-val');
+                        setVal('dof-enabled', s.dofEnabled);
+                        setVal('dof-quality', s.dofQuality);
+                        setVal('dof-focal-distance', s.dofFocalDistance, 'dof-focal-distance-val');
+                        setVal('dof-focal-range', s.dofFocalRange, 'dof-focal-range-val');
+                        setVal('dof-blur-strength', s.dofBlurStrength, 'dof-blur-strength-val');
+                        setVal('ssr-enabled', s.ssrEnabled);
+                        setVal('ssr-quality', s.ssrQuality);
+                        setVal('ssr-max-distance', s.ssrMaxDistance, 'ssr-max-distance-val');
+                        setVal('ssr-thickness', s.ssrThickness, 'ssr-thickness-val');
+                        setVal('ssr-intensity', s.ssrIntensity, 'ssr-intensity-val');
+                        setVal('motion-blur-enabled', s.motionBlurEnabled);
+                        setVal('motion-blur-quality', s.motionBlurQuality);
+                        setVal('motion-blur-intensity', s.motionBlurIntensity, 'motion-blur-intensity-val');
+                        setVal('motion-blur-max', s.motionBlurMax, 'motion-blur-max-val');
+                        setVal('motion-blur-velocity', s.motionBlurVelocity, 'motion-blur-velocity-val');
+                        setVal('outline-enabled', s.outlineEnabled);
+                        setVal('outline-mode', s.outlineMode);
+                        setVal('outline-thickness', s.outlineThickness, 'outline-thickness-val');
+                        setVal('outline-depth', s.outlineDepth, 'outline-depth-val');
+                        setVal('outline-normal', s.outlineNormal, 'outline-normal-val');
+                        setVal('outline-color', s.outlineColor);
+                        setVal('show-grid', s.showGrid);
+                        setVal('show-axes', s.showAxes);
+
+                        console.log('Loaded settings from localStorage');
+                    } catch (e) {
+                        console.warn('Failed to load settings:', e);
+                    }
+                }
+
+                function applySettingsToApp() {
+                    // Apply all current UI values to the app
+                    app.set_bloom_enabled(document.getElementById('bloom-enabled').checked);
+                    app.set_bloom_intensity(parseFloat(document.getElementById('bloom-intensity').value));
+                    app.set_bloom_threshold(parseFloat(document.getElementById('bloom-threshold').value));
+                    app.set_exposure(parseFloat(document.getElementById('exposure').value));
+                    app.set_vignette_enabled(document.getElementById('vignette-enabled').checked);
+                    app.set_vignette_intensity(parseFloat(document.getElementById('vignette-intensity').value));
+                    app.set_vignette_smoothness(parseFloat(document.getElementById('vignette-smoothness').value));
+                    app.set_vignette_roundness(parseFloat(document.getElementById('vignette-roundness').value));
+                    app.set_color_correction_enabled(document.getElementById('cc-enabled').checked);
+                    app.set_cc_brightness(parseFloat(document.getElementById('cc-brightness').value));
+                    app.set_cc_contrast(parseFloat(document.getElementById('cc-contrast').value));
+                    app.set_cc_saturation(parseFloat(document.getElementById('cc-saturation').value));
+                    app.set_cc_gamma(parseFloat(document.getElementById('cc-gamma').value));
+                    app.set_cc_temperature(parseFloat(document.getElementById('cc-temperature').value));
+                    app.set_cc_tint(parseFloat(document.getElementById('cc-tint').value));
+                    app.set_hemisphere_light_enabled(document.getElementById('hemisphere-enabled').checked);
+                    app.set_hemisphere_intensity(parseFloat(document.getElementById('hemisphere-intensity').value));
+                    app.set_skybox_enabled(document.getElementById('skybox-enabled').checked);
+                    app.set_skybox_exposure(parseFloat(document.getElementById('skybox-exposure').value));
+                    if (app.set_shadows_enabled) app.set_shadows_enabled(document.getElementById('shadows-enabled').checked);
+                    app.set_ssao_enabled(document.getElementById('ssao-enabled').checked);
+                    app.set_ssao_quality(parseInt(document.getElementById('ssao-quality').value));
+                    app.set_ssao_radius(parseFloat(document.getElementById('ssao-radius').value));
+                    app.set_ssao_intensity(parseFloat(document.getElementById('ssao-intensity').value));
+                    if (app.set_ssao_bias) app.set_ssao_bias(parseFloat(document.getElementById('ssao-bias').value));
+                    if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(parseFloat(document.getElementById('ibl-diffuse').value));
+                    if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(parseFloat(document.getElementById('ibl-specular').value));
+                    app.set_aa_mode(parseInt(document.getElementById('aa-mode').value));
+                    app.set_fxaa_quality(parseInt(document.getElementById('fxaa-quality').value));
+                    app.set_smaa_quality(parseInt(document.getElementById('smaa-quality').value));
+                    app.set_taa_blend_factor(parseFloat(document.getElementById('taa-blend').value));
+                    app.set_taa_sharpness(parseFloat(document.getElementById('taa-sharpness').value));
+                    app.set_dof_enabled(document.getElementById('dof-enabled').checked);
+                    app.set_dof_quality(parseInt(document.getElementById('dof-quality').value));
+                    app.set_dof_focal_distance(parseFloat(document.getElementById('dof-focal-distance').value));
+                    app.set_dof_focal_range(parseFloat(document.getElementById('dof-focal-range').value));
+                    app.set_dof_blur_strength(parseFloat(document.getElementById('dof-blur-strength').value));
+                    app.set_ssr_enabled(document.getElementById('ssr-enabled').checked);
+                    app.set_ssr_quality(parseInt(document.getElementById('ssr-quality').value));
+                    app.set_ssr_max_distance(parseFloat(document.getElementById('ssr-max-distance').value));
+                    app.set_ssr_thickness(parseFloat(document.getElementById('ssr-thickness').value));
+                    app.set_ssr_intensity(parseFloat(document.getElementById('ssr-intensity').value));
+                    app.set_motion_blur_enabled(document.getElementById('motion-blur-enabled').checked);
+                    app.set_motion_blur_quality(parseInt(document.getElementById('motion-blur-quality').value));
+                    app.set_motion_blur_intensity(parseFloat(document.getElementById('motion-blur-intensity').value));
+                    app.set_motion_blur_max(parseFloat(document.getElementById('motion-blur-max').value));
+                    app.set_motion_blur_velocity_scale(parseFloat(document.getElementById('motion-blur-velocity').value));
+                    app.set_outline_enabled(document.getElementById('outline-enabled').checked);
+                    app.set_outline_mode(parseInt(document.getElementById('outline-mode').value));
+                    app.set_outline_thickness(parseFloat(document.getElementById('outline-thickness').value));
+                    app.set_outline_depth_threshold(parseFloat(document.getElementById('outline-depth').value));
+                    app.set_outline_normal_threshold(parseFloat(document.getElementById('outline-normal').value));
+                    app.set_grid_visible(document.getElementById('show-grid').checked);
+                    app.set_axes_visible(document.getElementById('show-axes').checked);
+                    updateAAOptions();
+                    updateSkyColors();
+                }
+
+                // Load settings from localStorage and apply
+                loadSettings();
+                applySettingsToApp();
+
+                // Add save on change to all inputs
+                document.querySelectorAll('#panel input, #panel select').forEach(el => {
+                    el.addEventListener('change', saveSettings);
+                    el.addEventListener('input', saveSettings);
                 });
 
                 // Initialize shadow settings from default checkbox values

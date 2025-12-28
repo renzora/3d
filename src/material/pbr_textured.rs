@@ -49,6 +49,8 @@ pub struct TexturedPbrMaterial {
     id: Id,
     /// Base color (used when no albedo texture).
     pub color: Color,
+    /// Alpha/opacity (0.0 = fully transparent, 1.0 = fully opaque).
+    pub alpha: f32,
     /// Metallic factor (used when no metallic-roughness texture).
     pub metallic: f32,
     /// Roughness factor (used when no metallic-roughness texture).
@@ -90,6 +92,7 @@ impl TexturedPbrMaterial {
         Self {
             id: Id::new(),
             color: Color::WHITE,
+            alpha: 1.0,
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
@@ -162,7 +165,7 @@ impl TexturedPbrMaterial {
     /// Get the material uniform data.
     pub fn uniform(&self) -> TexturedPbrMaterialUniform {
         TexturedPbrMaterialUniform {
-            base_color: [self.color.r, self.color.g, self.color.b, 1.0],
+            base_color: [self.color.r, self.color.g, self.color.b, self.alpha],
             metallic: self.metallic,
             roughness: self.roughness,
             ao: self.ao,
@@ -341,6 +344,42 @@ impl TexturedPbrMaterial {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
+                    // Environment map texture for IBL (binding 11)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Environment map sampler (binding 12)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // BRDF LUT texture (binding 13)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // BRDF LUT sampler (binding 14)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -407,7 +446,7 @@ impl TexturedPbrMaterial {
         self.needs_update = false;
     }
 
-    /// Create a combined texture + shadow bind group.
+    /// Create a combined texture + shadow + environment + BRDF LUT bind group.
     pub fn create_texture_shadow_bind_group(
         &self,
         device: &wgpu::Device,
@@ -422,10 +461,14 @@ impl TexturedPbrMaterial {
         shadow_sampler: &wgpu::Sampler,
         shadow_cube_map_view: &wgpu::TextureView,
         shadow_cube_sampler: &wgpu::Sampler,
+        env_map_view: &wgpu::TextureView,
+        env_sampler: &wgpu::Sampler,
+        brdf_lut_view: &wgpu::TextureView,
+        brdf_lut_sampler: &wgpu::Sampler,
     ) -> Option<wgpu::BindGroup> {
         self.texture_bind_group_layout.as_ref().map(|layout| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Textured PBR Texture+Shadow Bind Group"),
+                label: Some("Textured PBR Texture+Shadow+Env+BRDF Bind Group"),
                 layout,
                 entries: &[
                     // Textures (bindings 0-5)
@@ -474,6 +517,24 @@ impl TexturedPbrMaterial {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: wgpu::BindingResource::Sampler(shadow_cube_sampler),
+                    },
+                    // Environment map for IBL (bindings 11-12)
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: wgpu::BindingResource::TextureView(env_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wgpu::BindingResource::Sampler(env_sampler),
+                    },
+                    // BRDF LUT (bindings 13-14)
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: wgpu::BindingResource::TextureView(brdf_lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: wgpu::BindingResource::Sampler(brdf_lut_sampler),
                     },
                 ],
             })

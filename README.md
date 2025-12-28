@@ -190,7 +190,7 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `texture2d.rs` | Standard 2D texture | ✅ |
 | `sampler.rs` | Texture sampling parameters | ✅ |
 | `texture3d.rs` | 3D/volume texture | |
-| `cube_texture.rs` | Cubemap texture | |
+| `cube_texture.rs` | Cubemap texture | ✅ |
 | `data_texture.rs` | Texture from raw data | |
 | `compressed_texture.rs` | GPU compressed formats | |
 | `video_texture.rs` | Video as texture | |
@@ -230,7 +230,7 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `directional_shadow.rs` | Directional light shadows | ✅ |
 | `pcf_shadow.rs` | PCF shadow filtering (3x3) | ✅ |
 | `spot_shadow.rs` | Perspective shadow map | ✅ |
-| `point_shadow.rs` | Omnidirectional shadow (cubemap) | Partial |
+| `point_shadow.rs` | Omnidirectional shadow (cubemap) | ✅ |
 | `cascade.rs` | Cascaded shadow maps | ✅ (infrastructure) |
 
 ---
@@ -621,8 +621,142 @@ Lumen provides global illumination through a hybrid approach: screen-space for n
 | `environment_map.rs` | Environment cubemap |
 | `pmrem_generator.rs` | Prefiltered mipmap env |
 | `spherical_harmonics.rs` | SH for irradiance |
-| `skybox.rs` | Skybox rendering |
+| `skybox.rs` | Skybox rendering | ✅ |
 | `procedural_sky.rs` | Procedural sky |
+
+---
+
+## Phase 14.5: Realistic PBR & IBL Quality
+
+This phase focuses on achieving Sketchfab-level rendering quality through proper IBL implementation and PBR enhancements.
+
+### 14.5.1 Pre-filtered Environment Maps (`src/ibl/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `prefilter_generator.rs` | Generate pre-convolved env maps with importance sampling | |
+| `mipmap_roughness.rs` | Each mip level = different roughness response | |
+| `hdr_loader.rs` | Load HDR/EXR environment maps | |
+| `cubemap_converter.rs` | Convert equirect to cubemap with HDR support | |
+| `irradiance_map.rs` | Diffuse irradiance convolution | |
+
+### 14.5.2 BRDF Look-Up Table (`src/texture/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `brdf_lut.rs` | Pre-compute BRDF integration LUT | ✅ |
+| Split-sum approximation | Implemented in pbr_textured.wgsl | ✅ |
+
+### 14.5.3 Spherical Harmonics (`src/ibl/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `sh_coefficients.rs` | 9-coefficient SH representation (L2) | |
+| `sh_projection.rs` | Project environment to SH | |
+| `sh_irradiance.rs` | Evaluate SH for diffuse lighting | |
+| `sh_rotation.rs` | Rotate SH coefficients | |
+
+### 14.5.4 Energy Conservation & Multi-Scattering (`src/materials/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `energy_compensation.rs` | Multi-scattering energy compensation | |
+| `kulla_conty.rs` | Kulla-Conty multi-scattering BRDF | |
+| `fresnel_coat.rs` | Proper Fresnel for clearcoat | |
+
+### 14.5.5 Ground Plane & Grounding (`src/helpers/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `shadow_catcher.rs` | Ground plane that only receives shadows | |
+| `reflection_plane.rs` | Ground plane reflections | |
+| `contact_shadow.rs` | Screen-space contact shadows | |
+| `ao_ground.rs` | Ambient occlusion ground contact | |
+
+### 14.5.6 HDR Pipeline Improvements (`src/postprocessing/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `tonemapping_pass.rs` | ACES/AgX/Uncharted2 filmic tonemapping | ✅ |
+| `auto_exposure.rs` | Automatic exposure based on luminance | |
+| `histogram_exposure.rs` | Histogram-based exposure | |
+| `bloom_pass.rs` | Proper HDR bloom with threshold | ✅ |
+
+### 14.5.7 Advanced Shadows (`src/shadows/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `pcss.rs` | Percentage-Closer Soft Shadows (penumbra) | |
+| `contact_shadows.rs` | Screen-space contact shadows | |
+| `shadow_denoiser.rs` | Temporal shadow denoising | |
+
+### 14.5.8 Advanced Ambient Occlusion (`src/postprocessing/effects/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `gtao_pass.rs` | Ground Truth Ambient Occlusion | |
+| `ssgi_pass.rs` | Screen-Space Global Illumination | |
+| `bent_normals.rs` | Bent normals for improved AO | |
+
+### 14.5.9 Clustered Forward Rendering (`src/renderers/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `clustered_forward.rs` | 3D tile/cluster light assignment | |
+| `light_culling.rs` | GPU light culling compute shader | |
+| `light_buffer.rs` | Storage buffer for dynamic lights | |
+| `cluster_builder.rs` | Build frustum clusters | |
+
+### 14.5.10 Shaders (`src/shaders/`)
+| File | Description | Status |
+|------|-------------|--------|
+| `pbr_textured.wgsl` | Full IBL with BRDF LUT + env map | ✅ |
+| `sh_lighting.wgsl` | Spherical harmonics lighting | |
+| `prefilter_env.wgsl` | Environment prefiltering shader | |
+| `pcss.wgsl` | PCSS soft shadow sampling | |
+| `contact_shadows.wgsl` | Screen-space contact shadows | |
+| `gtao.wgsl` | Ground Truth AO shader | |
+| `clustered_lighting.wgsl` | Clustered forward light loop | |
+
+### Key Implementation Notes
+
+**BRDF LUT ✅ IMPLEMENTED**
+```
+- 128x128 RGBA8 texture (fast generation)
+- Indexed by (NdotV, roughness)
+- Returns (scale, bias) for F0 in R,G channels
+- Pre-computed at startup in src/texture/brdf_lut.rs
+- Used in pbr_textured.wgsl split-sum approximation
+```
+
+**Pre-filtered Environment**
+```
+- 6-8 mip levels
+- Mip 0 = mirror reflection (roughness 0)
+- Higher mips = blurrier (higher roughness)
+- Importance-sampled GGX during bake
+- Requires HDR source for quality
+```
+
+**Spherical Harmonics**
+```
+- L2 (9 coefficients) sufficient for diffuse
+- Much faster than cubemap sampling
+- Smooth, no aliasing
+- Easy to blend/interpolate
+```
+
+**Ground Plane**
+```
+- Essential for "grounding" objects
+- Shadow-only material (alpha = shadow)
+- Optional reflection (SSR or planar)
+- Contact shadows at object base
+```
+
+### Priority Order for Realism
+
+| Priority | Feature | Impact | Effort |
+|----------|---------|--------|--------|
+| 1 | Pre-filtered Environment Maps | High | Medium |
+| 2 | Irradiance Map (diffuse IBL) | High | Medium |
+| 3 | PCSS Soft Shadows | Medium | Low |
+| 4 | Contact Shadows | Medium | Low |
+| 5 | GTAO | Medium | Medium |
+| 6 | Spherical Harmonics | Medium | Medium |
+| 7 | Clustered Forward | High (many lights) | High |
+| 8 | Auto Exposure | Low | Low |
 
 ---
 
