@@ -53,6 +53,7 @@ pub mod animation;
 pub mod loaders;
 pub mod postprocessing;
 pub mod ibl;
+pub mod illumination;
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub mod web;

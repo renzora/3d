@@ -5,6 +5,9 @@
 //! 2. Denoise Pass: Edge-aware bilateral blur
 //! 3. Temporal Pass: Accumulate with history for stability
 //! 4. Composite Pass: Add GI to scene
+//!
+//! When SSGI rays go off-screen or miss geometry, the system falls back to
+//! irradiance probe sampling using L2 Spherical Harmonics for stable ambient GI.
 
 use crate::postprocessing::pass::{FullscreenVertex, Pass, FULLSCREEN_QUAD_VERTICES};
 use wgpu::util::DeviceExt;
@@ -82,6 +85,8 @@ struct LumenUniform {
     inv_projection: [[f32; 4]; 4],
     /// View matrix.
     view: [[f32; 4]; 4],
+    /// Inverse view matrix (for world position reconstruction).
+    inv_view: [[f32; 4]; 4],
     /// Previous frame view-projection (for reprojection).
     prev_view_proj: [[f32; 4]; 4],
     /// 1/width, 1/height, width, height
@@ -104,6 +109,7 @@ pub struct LumenPass {
     projection: [[f32; 4]; 4],
     inv_projection: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
+    inv_view: [[f32; 4]; 4],
     prev_view_proj: [[f32; 4]; 4],
     near: f32,
     far: f32,
@@ -114,6 +120,7 @@ pub struct LumenPass {
     composite_pipeline: Option<wgpu::RenderPipeline>,
     // Bind group layouts
     ssgi_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    probe_bind_group_layout: Option<wgpu::BindGroupLayout>,
     denoise_bind_group_layout: Option<wgpu::BindGroupLayout>,
     temporal_bind_group_layout: Option<wgpu::BindGroupLayout>,
     composite_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -149,6 +156,7 @@ impl LumenPass {
             projection: [[0.0; 4]; 4],
             inv_projection: [[0.0; 4]; 4],
             view: [[0.0; 4]; 4],
+            inv_view: [[0.0; 4]; 4],
             prev_view_proj: [[0.0; 4]; 4],
             near: 0.1,
             far: 100.0,
@@ -157,6 +165,7 @@ impl LumenPass {
             temporal_pipeline: None,
             composite_pipeline: None,
             ssgi_bind_group_layout: None,
+            probe_bind_group_layout: None,
             denoise_bind_group_layout: None,
             temporal_bind_group_layout: None,
             composite_bind_group_layout: None,
@@ -213,6 +222,7 @@ impl LumenPass {
         projection: [[f32; 4]; 4],
         inv_projection: [[f32; 4]; 4],
         view: [[f32; 4]; 4],
+        inv_view: [[f32; 4]; 4],
         near: f32,
         far: f32,
     ) {
@@ -221,6 +231,7 @@ impl LumenPass {
         self.projection = projection;
         self.inv_projection = inv_projection;
         self.view = view;
+        self.inv_view = inv_view;
         self.near = near;
         self.far = far;
     }
@@ -280,6 +291,7 @@ impl LumenPass {
             projection: [[0.0; 4]; 4],
             inv_projection: [[0.0; 4]; 4],
             view: [[0.0; 4]; 4],
+            inv_view: [[0.0; 4]; 4],
             prev_view_proj: [[0.0; 4]; 4],
             resolution: [
                 1.0 / width as f32,
@@ -365,6 +377,37 @@ impl LumenPass {
                     // Uniforms
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            }));
+
+        // Probe bind group layout (matches probe_volume.rs layout)
+        // Group 1: SH probe data + grid info
+        self.probe_bind_group_layout =
+            Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Lumen Probe Bind Group Layout"),
+                entries: &[
+                    // Probe SH Data (Storage, read-only)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Grid Info (Uniform)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -557,11 +600,19 @@ impl LumenPass {
             }));
     }
 
+    /// Get the probe bind group layout for external probe volumes to use.
+    pub fn probe_bind_group_layout(&self) -> Option<&wgpu::BindGroupLayout> {
+        self.probe_bind_group_layout.as_ref()
+    }
+
     fn create_pipelines(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        // SSGI pipeline
+        // SSGI pipeline - uses two bind groups: textures/uniforms + probes
         let ssgi_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Lumen SSGI Pipeline Layout"),
-            bind_group_layouts: &[self.ssgi_bind_group_layout.as_ref().unwrap()],
+            bind_group_layouts: &[
+                self.ssgi_bind_group_layout.as_ref().unwrap(),
+                self.probe_bind_group_layout.as_ref().unwrap(),
+            ],
             push_constant_ranges: &[],
         });
 
@@ -822,6 +873,7 @@ impl LumenPass {
                 projection: self.projection,
                 inv_projection: self.inv_projection,
                 view: self.view,
+                inv_view: self.inv_view,
                 prev_view_proj: self.prev_view_proj,
                 resolution: [
                     1.0 / self.width as f32,
@@ -846,13 +898,18 @@ impl LumenPass {
         }
     }
 
-    /// Render Lumen GI effect.
+    /// Render Lumen GI effect with probe-based fallback.
+    ///
+    /// # Arguments
+    /// * `probe_bind_group` - Optional bind group from ProbeVolume for SH irradiance fallback.
+    ///                        When rays miss or go off-screen, probes provide stable ambient GI.
     pub fn render_with_depth(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         depth_view: &wgpu::TextureView,
         scene_view: &wgpu::TextureView,
         output: &wgpu::TextureView,
+        probe_bind_group: Option<&wgpu::BindGroup>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) {
@@ -893,7 +950,7 @@ impl LumenPass {
 
         self.update_uniforms(queue);
 
-        // Pass 1: SSGI ray tracing
+        // Pass 1: SSGI ray tracing with probe fallback
         {
             let Some(ref ssgi_pipeline) = self.ssgi_pipeline else {
                 return;
@@ -946,6 +1003,11 @@ impl LumenPass {
 
             pass.set_pipeline(ssgi_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
+
+            // Bind probe data for irradiance fallback
+            if let Some(probes) = probe_bind_group {
+                pass.set_bind_group(1, probes, &[]);
+            }
             pass.set_vertex_buffer(0, quad_buffer.slice(..));
             pass.draw(0..6, 0..1);
         }
@@ -1183,6 +1245,7 @@ impl LumenPass {
             projection: self.projection,
             inv_projection: self.inv_projection,
             view: self.view,
+            inv_view: self.inv_view,
             prev_view_proj: self.prev_view_proj,
             resolution: [
                 1.0 / self.width as f32,
@@ -1284,7 +1347,7 @@ impl Pass for LumenPass {
 // SHADERS
 // ============================================================================
 
-// SSGI shader - traces rays in hemisphere and samples scene radiance
+// SSGI shader - traces rays in hemisphere, samples scene radiance, falls back to SH probes
 const SSGI_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -1300,17 +1363,42 @@ struct Params {
     projection: mat4x4<f32>,
     inv_projection: mat4x4<f32>,
     view: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
     resolution: vec4<f32>,
     params: vec4<f32>,
     params2: vec4<f32>,
 }
 
+// L2 Spherical Harmonics coefficients (9 vec4s per probe)
+struct SphericalHarmonics {
+    c0: vec4<f32>,
+    c1: vec4<f32>,
+    c2: vec4<f32>,
+    c3: vec4<f32>,
+    c4: vec4<f32>,
+    c5: vec4<f32>,
+    c6: vec4<f32>,
+    c7: vec4<f32>,
+    c8: vec4<f32>,
+}
+
+// Probe grid information
+struct ProbeGridInfo {
+    origin: vec4<f32>,  // xyz = origin, w = spacing
+    dim: vec4<f32>,     // xyz = dimensions, w = total probes
+}
+
+// Group 0: Scene textures and uniforms
 @group(0) @binding(0) var depth_texture: texture_depth_2d;
 @group(0) @binding(1) var scene_texture: texture_2d<f32>;
 @group(0) @binding(2) var point_sampler: sampler;
 @group(0) @binding(3) var linear_sampler: sampler;
 @group(0) @binding(4) var<uniform> params: Params;
+
+// Group 1: Irradiance probes for fallback GI
+@group(1) @binding(0) var<storage, read> probe_sh: array<SphericalHarmonics>;
+@group(1) @binding(1) var<uniform> probe_grid: ProbeGridInfo;
 
 const PI: f32 = 3.14159265359;
 
@@ -1342,6 +1430,18 @@ fn get_view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     var view_pos = params.inv_projection * ndc;
     view_pos /= view_pos.w;
     return view_pos.xyz;
+}
+
+// Convert view-space position to world-space
+fn view_to_world(view_pos: vec3<f32>) -> vec3<f32> {
+    let world_pos = params.inv_view * vec4<f32>(view_pos, 1.0);
+    return world_pos.xyz;
+}
+
+// Convert view-space direction to world-space direction
+fn view_dir_to_world(view_dir: vec3<f32>) -> vec3<f32> {
+    let world_dir = params.inv_view * vec4<f32>(view_dir, 0.0);
+    return normalize(world_dir.xyz);
 }
 
 // Reconstruct normal from depth
@@ -1394,8 +1494,99 @@ fn create_tbn(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(tangent, bitangent, n);
 }
 
-// Trace a single GI ray
-fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec4<f32> {
+// ============================================================================
+// Spherical Harmonics evaluation for irradiance probes
+// ============================================================================
+
+// Evaluate L2 SH irradiance for a given direction (world-space)
+fn evaluate_sh_irradiance(sh: SphericalHarmonics, dir: vec3<f32>) -> vec3<f32> {
+    // SH basis function constants
+    let c0 = 0.282095;   // 1 / (2 * sqrt(PI))
+    let c1 = 0.488603;   // sqrt(3) / (2 * sqrt(PI))
+    let c2 = 1.092548;   // sqrt(15) / (2 * sqrt(PI))
+    let c3 = 0.315392;   // sqrt(5) / (4 * sqrt(PI))
+    let c4 = 0.546274;   // sqrt(15) / (4 * sqrt(PI))
+
+    // Normalized direction
+    let d = normalize(dir);
+
+    // Band 0 (L=0)
+    var irradiance = sh.c0.xyz * c0;
+
+    // Band 1 (L=1)
+    irradiance += sh.c1.xyz * c1 * d.y;  // Y
+    irradiance += sh.c2.xyz * c1 * d.z;  // Z
+    irradiance += sh.c3.xyz * c1 * d.x;  // X
+
+    // Band 2 (L=2)
+    irradiance += sh.c4.xyz * c2 * d.x * d.y;
+    irradiance += sh.c5.xyz * c2 * d.y * d.z;
+    irradiance += sh.c6.xyz * c3 * (3.0 * d.z * d.z - 1.0);
+    irradiance += sh.c7.xyz * c2 * d.x * d.z;
+    irradiance += sh.c8.xyz * c4 * (d.x * d.x - d.y * d.y);
+
+    return max(irradiance, vec3<f32>(0.0));
+}
+
+// Get probe index from grid coordinates
+fn get_probe_index(ix: i32, iy: i32, iz: i32) -> i32 {
+    let dim_x = i32(probe_grid.dim.x);
+    let dim_y = i32(probe_grid.dim.y);
+    return ix + iy * dim_x + iz * dim_x * dim_y;
+}
+
+// Sample irradiance from probe grid using trilinear interpolation
+fn sample_probe_irradiance(world_pos: vec3<f32>, world_dir: vec3<f32>) -> vec3<f32> {
+    let origin = probe_grid.origin.xyz;
+    let spacing = probe_grid.origin.w;
+    let dim = vec3<i32>(i32(probe_grid.dim.x), i32(probe_grid.dim.y), i32(probe_grid.dim.z));
+    let total_probes = i32(probe_grid.dim.w);
+
+    // Convert world position to grid coordinates
+    let grid_pos = (world_pos - origin) / spacing;
+
+    // Get base grid cell
+    let base = vec3<i32>(floor(grid_pos));
+    let frac = fract(grid_pos);
+
+    // Clamp to valid range
+    let min_idx = vec3<i32>(0, 0, 0);
+    let max_idx = dim - vec3<i32>(1, 1, 1);
+
+    // Sample 8 corners of the cell
+    var total_irradiance = vec3<f32>(0.0);
+
+    for (var dz = 0; dz <= 1; dz++) {
+        for (var dy = 0; dy <= 1; dy++) {
+            for (var dx = 0; dx <= 1; dx++) {
+                let cell = clamp(base + vec3<i32>(dx, dy, dz), min_idx, max_idx);
+                let idx = get_probe_index(cell.x, cell.y, cell.z);
+
+                if (idx >= 0 && idx < total_probes) {
+                    let sh = probe_sh[idx];
+                    let probe_irr = evaluate_sh_irradiance(sh, world_dir);
+
+                    // Trilinear weight
+                    let w = vec3<f32>(f32(dx), f32(dy), f32(dz));
+                    let weight = abs((1.0 - w.x) - frac.x * (1.0 - 2.0 * w.x)) *
+                                 abs((1.0 - w.y) - frac.y * (1.0 - 2.0 * w.y)) *
+                                 abs((1.0 - w.z) - frac.z * (1.0 - 2.0 * w.z));
+
+                    total_irradiance += probe_irr * weight;
+                }
+            }
+        }
+    }
+
+    return total_irradiance;
+}
+
+// ============================================================================
+// Ray tracing with probe fallback
+// ============================================================================
+
+// Trace a single GI ray, falling back to probe sampling when ray misses
+fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32, world_origin: vec3<f32>) -> vec4<f32> {
     let max_distance = params.params.x;
     let thickness = params.params.y;
 
@@ -1409,17 +1600,17 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec
         let screen = project_to_screen(ray_pos);
         let uv = screen.xy;
 
-        // Check bounds - when ray goes off-screen, use IBL fallback
+        // Check bounds - when ray goes off-screen, sample probes
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-            // Simple hemisphere-based IBL fallback for off-screen rays
-            // Use the ray direction to interpolate between sky and ground colors
-            let up_factor = direction.y * 0.5 + 0.5; // 0 = down, 1 = up
-            let sky_color = vec3<f32>(0.6, 0.75, 0.9);   // Light blue sky
-            let ground_color = vec3<f32>(0.2, 0.15, 0.1); // Warm brown ground
-            let fallback_color = mix(ground_color, sky_color, up_factor);
-            // Reduced intensity for IBL fallback (subtle ambient)
-            let fallback_intensity = 0.15;
-            return vec4<f32>(fallback_color * fallback_intensity, 1.0);
+            // Calculate world-space position and direction for probe sampling
+            let world_ray_pos = view_to_world(ray_pos);
+            let world_dir = view_dir_to_world(direction);
+
+            // Sample irradiance from probe grid
+            let probe_irr = sample_probe_irradiance(world_ray_pos, world_dir);
+            let probe_intensity = 0.25; // Blend factor for probe contribution
+
+            return vec4<f32>(probe_irr * probe_intensity, 1.0);
         }
 
         // Sample depth
@@ -1428,7 +1619,6 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec
         // Sky hit - sample sky color for ambient contribution
         if (sampled_depth >= 0.9999) {
             let sky_color = textureSampleLevel(scene_texture, linear_sampler, uv, 0.0).rgb;
-            // Reduced intensity for sky contribution (acts as ambient)
             let sky_intensity = 0.3;
             let t = f32(i) / f32(step_count);
             let distance_fade = 1.0 - t;
@@ -1455,13 +1645,13 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec
         }
     }
 
-    // No hit found after all steps - use IBL fallback based on ray direction
-    let up_factor = direction.y * 0.5 + 0.5;
-    let sky_color = vec3<f32>(0.6, 0.75, 0.9);
-    let ground_color = vec3<f32>(0.2, 0.15, 0.1);
-    let fallback_color = mix(ground_color, sky_color, up_factor);
-    let fallback_intensity = 0.1; // Even more subtle for max-distance fallback
-    return vec4<f32>(fallback_color * fallback_intensity, 1.0);
+    // No hit found after all steps - sample probes at final ray position
+    let world_ray_pos = view_to_world(ray_pos);
+    let world_dir = view_dir_to_world(direction);
+    let probe_irr = sample_probe_irradiance(world_ray_pos, world_dir);
+    let probe_intensity = 0.2; // Slightly lower for max-distance fallback
+
+    return vec4<f32>(probe_irr * probe_intensity, 1.0);
 }
 
 @fragment
@@ -1478,6 +1668,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let view_pos = get_view_pos(in.uv, depth);
+    let world_origin = view_to_world(view_pos);
     let normal = get_normal(in.uv, depth);
     let tbn = create_tbn(normal);
 
@@ -1491,13 +1682,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // Cosine-weighted hemisphere sample
         let local_dir = cosine_sample_hemisphere(rnd.x, rnd.y);
-        let world_dir = tbn * local_dir;
+        let view_dir = tbn * local_dir;
 
         // Weight by cos(theta) - already built into cosine sampling
         let weight = local_dir.z;
 
-        // Trace ray
-        let hit = trace_gi_ray(view_pos + normal * 0.01, world_dir, step_count);
+        // Trace ray with probe fallback
+        let hit = trace_gi_ray(view_pos + normal * 0.01, view_dir, step_count, world_origin);
 
         if (hit.w > 0.0) {
             accumulated_gi += hit.rgb * weight;
@@ -1529,6 +1720,7 @@ struct Params {
     projection: mat4x4<f32>,
     inv_projection: mat4x4<f32>,
     view: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
     resolution: vec4<f32>,
     params: vec4<f32>,
@@ -1649,6 +1841,7 @@ struct Params {
     projection: mat4x4<f32>,
     inv_projection: mat4x4<f32>,
     view: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
     resolution: vec4<f32>,
     params: vec4<f32>,
@@ -1794,6 +1987,7 @@ struct Params {
     projection: mat4x4<f32>,
     inv_projection: mat4x4<f32>,
     view: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
     prev_view_proj: mat4x4<f32>,
     resolution: vec4<f32>,
     params: vec4<f32>,

@@ -21,6 +21,7 @@ use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
 use crate::ibl::irradiance::generate_sky_irradiance;
+use crate::illumination::ProbeVolume;
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
@@ -174,6 +175,7 @@ pub struct RenApp {
     ssao: SsaoPass,
     gtao: GtaoPass,
     lumen: LumenPass,
+    probe_volume: ProbeVolume,
     ssr: SsrPass,
     vignette: VignettePass,
     dof: DofPass,
@@ -577,6 +579,10 @@ impl RenApp {
         lumen.set_enabled(false);
         lumen.init(&device, &queue, hdr_format, width, height);
 
+        // Create irradiance probe volume for GI fallback
+        let mut probe_volume = ProbeVolume::default();
+        probe_volume.init(&device, &queue);
+
         // Create SSR pass (renders to HDR scene)
         let mut ssr = SsrPass::new();
         ssr.set_enabled(false); // Disabled by default
@@ -927,6 +933,7 @@ impl RenApp {
             ssao,
             gtao,
             lumen,
+            probe_volume,
             ssr,
             vignette,
             dof,
@@ -1138,7 +1145,8 @@ impl RenApp {
                 let proj = matrix4_to_array(camera.projection_matrix());
                 let inv_proj = matrix4_to_array(&camera.projection_matrix().inverse());
                 let view = matrix4_to_array(camera.view_matrix());
-                self.lumen.set_matrices(proj, inv_proj, view, camera.near, camera.far);
+                let inv_view = matrix4_to_array(&camera.view_matrix().inverse());
+                self.lumen.set_matrices(proj, inv_proj, view, inv_view, camera.near, camera.far);
             }
 
             // Update volumetric fog matrices
@@ -1584,7 +1592,9 @@ impl RenApp {
         // Apply Lumen GI if enabled (adds global illumination to scene)
         // Only apply in Lit mode (render_mode == 0)
         if self.lumen.enabled() && self.render_mode == 0 {
-            self.lumen.render_with_depth(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
+            // Get probe bind group for SH irradiance fallback when SSGI rays miss
+            let probe_bind_group = self.probe_volume.bind_group();
+            self.lumen.render_with_depth(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, probe_bind_group, &self.device, &self.queue);
             // Copy result back to scene_view for next passes
             encoder.copy_texture_to_texture(
                 wgpu::ImageCopyTexture {
