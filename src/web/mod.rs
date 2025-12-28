@@ -210,6 +210,8 @@ pub struct RenApp {
     shadow_depth_pipeline: wgpu::RenderPipeline,
     shadow_model_bind_group_layout: wgpu::BindGroupLayout,
     light_direction: [f32; 3],
+    /// Cached light view-projection matrix for volumetric fog.
+    light_view_proj_matrix: [[f32; 4]; 4],
     // Shadow light type and spot light settings
     shadow_light_type: ShadowLightType,
     spot_position: [f32; 3],
@@ -973,6 +975,7 @@ impl RenApp {
             shadow_depth_pipeline,
             shadow_model_bind_group_layout,
             light_direction: [-0.5, -1.0, -0.3],
+            light_view_proj_matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
             shadow_light_type: ShadowLightType::Directional,
             spot_position: [0.0, 5.0, 0.0],
             spot_direction: [0.0, -1.0, 0.0],
@@ -1325,6 +1328,9 @@ impl RenApp {
 
             self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
 
+            // Store light view-projection matrix for volumetric fog
+            self.light_view_proj_matrix = matrix4_to_array(&light_view_proj);
+
             // Create bind group layout for shadow pass (reused for all passes)
             let shadow_light_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Shadow Light BG Layout"),
@@ -1620,8 +1626,11 @@ impl RenApp {
         // Apply volumetric fog if enabled (adds fog and god rays to scene)
         // Only apply in Lit mode (render_mode == 0)
         if self.volumetric_fog.enabled() && self.render_mode == 0 {
-            // Render fog: reads from scene_view, writes to bloom_input_view
-            self.volumetric_fog.render(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
+            // Set shadow matrix for volumetric god rays
+            let shadow_resolution = self.shadow_config.resolution as f32;
+            self.volumetric_fog.set_shadow_matrix(self.light_view_proj_matrix, shadow_resolution);
+            // Render fog: reads from scene_view + shadow_map, writes to bloom_input_view
+            self.volumetric_fog.render(&mut encoder, &self.depth_view, &self.shadow_map_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
             // Copy result back to scene_view for next passes
             encoder.copy_texture_to_texture(
                 wgpu::ImageCopyTexture {
@@ -3069,6 +3078,9 @@ impl RenApp {
             view_formats: &[],
         });
         self.vignette_view = self.vignette_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Update DoF pipeline to match new vignette texture format
+        self.dof.set_output_format(new_format, &self.device);
 
         // AgX works well for both HDR and SDR - no need to switch modes
         // AgX naturally desaturates bright lights, avoiding the ACES "notorious six" color clipping

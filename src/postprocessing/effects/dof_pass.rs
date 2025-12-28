@@ -561,6 +561,20 @@ impl DofPass {
             pass.draw(0..6, 0..1);
         }
     }
+
+    /// Update the output format and recreate pipelines.
+    /// Call this when switching between SDR and HDR output modes.
+    pub fn set_output_format(&mut self, format: wgpu::TextureFormat, device: &wgpu::Device) {
+        if self.output_format == format {
+            return;
+        }
+        self.output_format = format;
+
+        // Recreate pipelines with new format
+        if self.bokeh_pipeline.is_some() {
+            self.create_pipelines(device);
+        }
+    }
 }
 
 impl Default for DofPass {

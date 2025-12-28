@@ -1,10 +1,11 @@
-//! Volumetric Fog post-processing effect with god rays.
+//! Volumetric Fog post-processing effect with shadow-aware god rays.
 //!
 //! Implements atmospheric scattering through ray marching:
 //! 1. Ray march through fog volume from camera
-//! 2. Accumulate in-scattering from light sources
-//! 3. Apply extinction (absorption) along the ray
-//! 4. Composite with scene
+//! 2. Sample shadow map at each step to determine if lit
+//! 3. Accumulate in-scattering using Henyey-Greenstein phase function
+//! 4. Apply Beer-Lambert extinction (absorption) along the ray
+//! 5. Composite with scene additively for light shafts
 
 use crate::postprocessing::pass::{FullscreenVertex, FULLSCREEN_QUAD_VERTICES};
 use wgpu::util::DeviceExt;
@@ -62,6 +63,13 @@ pub struct VolumetricFogSettings {
     pub fog_color: [f32; 3],
     /// Enable god rays.
     pub god_rays_enabled: bool,
+    /// Mie scattering asymmetry parameter (-1 to 1).
+    /// Positive = forward scattering (sun look), negative = back scattering.
+    pub scattering_g: f32,
+    /// Use shadow map for volumetric shadows (god rays through geometry).
+    pub use_shadow_map: bool,
+    /// Shadow bias for volumetric sampling.
+    pub shadow_bias: f32,
 }
 
 impl Default for VolumetricFogSettings {
@@ -79,6 +87,9 @@ impl Default for VolumetricFogSettings {
             god_ray_decay: 0.95,
             fog_color: [0.7, 0.8, 0.9],
             god_rays_enabled: true,
+            scattering_g: 0.8, // Strong forward scattering for sun shafts
+            use_shadow_map: true,
+            shadow_bias: 0.005,
         }
     }
 }
@@ -89,6 +100,8 @@ impl Default for VolumetricFogSettings {
 struct VolumetricFogUniform {
     /// Inverse view-projection matrix.
     inv_view_proj: [[f32; 4]; 4],
+    /// Shadow (light) view-projection matrix.
+    shadow_matrix: [[f32; 4]; 4],
     /// Camera position.
     camera_pos: [f32; 4],
     /// Light direction (xyz) + intensity (w).
@@ -103,8 +116,10 @@ struct VolumetricFogUniform {
     scatter_params: [f32; 4],
     /// step_count, time, 1/width, 1/height.
     render_params: [f32; 4],
-    /// near, far, 0, 0.
+    /// near, far, scattering_g, shadow_bias.
     near_far: [f32; 4],
+    /// use_shadow_map (0 or 1), shadow_map_size, 1/shadow_map_size, padding.
+    shadow_params: [f32; 4],
 }
 
 /// Volumetric fog post-processing pass.
@@ -116,6 +131,7 @@ pub struct VolumetricFogPass {
     format: wgpu::TextureFormat,
     // Matrices
     inv_view_proj: [[f32; 4]; 4],
+    shadow_matrix: [[f32; 4]; 4],
     camera_pos: [f32; 3],
     near: f32,
     far: f32,
@@ -123,6 +139,8 @@ pub struct VolumetricFogPass {
     light_dir: [f32; 3],
     light_intensity: f32,
     light_color: [f32; 3],
+    // Shadow info
+    shadow_map_size: f32,
     // Frame counter for noise
     frame: u32,
     // Pipeline
@@ -137,6 +155,7 @@ pub struct VolumetricFogPass {
     // Samplers
     linear_sampler: Option<wgpu::Sampler>,
     point_sampler: Option<wgpu::Sampler>,
+    shadow_sampler: Option<wgpu::Sampler>,
 }
 
 impl VolumetricFogPass {
@@ -149,12 +168,19 @@ impl VolumetricFogPass {
             height: 1,
             format: wgpu::TextureFormat::Rgba16Float,
             inv_view_proj: [[0.0; 4]; 4],
+            shadow_matrix: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
             camera_pos: [0.0; 3],
             near: 0.1,
             far: 100.0,
             light_dir: [0.0, -1.0, 0.0],
             light_intensity: 1.0,
             light_color: [1.0, 1.0, 1.0],
+            shadow_map_size: 1024.0,
             frame: 0,
             pipeline: None,
             bind_group_layout: None,
@@ -164,6 +190,7 @@ impl VolumetricFogPass {
             quad_buffer: None,
             linear_sampler: None,
             point_sampler: None,
+            shadow_sampler: None,
         }
     }
 
@@ -263,6 +290,28 @@ impl VolumetricFogPass {
         self.light_color = color;
     }
 
+    /// Set shadow matrix (light view-projection) for volumetric shadows.
+    pub fn set_shadow_matrix(&mut self, matrix: [[f32; 4]; 4], shadow_map_size: f32) {
+        self.shadow_matrix = matrix;
+        self.shadow_map_size = shadow_map_size;
+    }
+
+    /// Set Mie scattering asymmetry parameter (-1 to 1).
+    /// Positive values give forward scattering (sun shafts look).
+    pub fn set_scattering_g(&mut self, g: f32) {
+        self.settings.scattering_g = g.clamp(-1.0, 1.0);
+    }
+
+    /// Enable or disable shadow map sampling for volumetric shadows.
+    pub fn set_use_shadow_map(&mut self, enabled: bool) {
+        self.settings.use_shadow_map = enabled;
+    }
+
+    /// Set shadow bias for volumetric sampling.
+    pub fn set_shadow_bias(&mut self, bias: f32) {
+        self.settings.shadow_bias = bias.clamp(0.0, 0.1);
+    }
+
     /// Initialize the pass.
     pub fn init(
         &mut self,
@@ -288,6 +337,16 @@ impl VolumetricFogPass {
             label: Some("Volumetric Fog Point Sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+
+        // Shadow sampler for volumetric shadows (non-comparison for uniform control flow)
+        self.shadow_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Volumetric Fog Shadow Sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         }));
 
@@ -334,23 +393,41 @@ impl VolumetricFogPass {
                     },
                     count: None,
                 },
-                // Linear sampler
+                // Shadow map texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Linear sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 // Point sampler
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // Shadow sampler (non-comparison for uniform control flow)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 // Uniform buffer
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -439,11 +516,15 @@ impl VolumetricFogPass {
         }
     }
 
-    /// Render volumetric fog.
+    /// Render volumetric fog with shadow-aware god rays.
+    ///
+    /// # Arguments
+    /// * `shadow_map_view` - The shadow map depth texture for volumetric shadows.
     pub fn render(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         depth_view: &wgpu::TextureView,
+        shadow_map_view: &wgpu::TextureView,
         scene_view: &wgpu::TextureView,
         output_view: &wgpu::TextureView,
         device: &wgpu::Device,
@@ -471,12 +552,16 @@ impl VolumetricFogPass {
         let Some(point_sampler) = &self.point_sampler else {
             return;
         };
+        let Some(shadow_sampler) = &self.shadow_sampler else {
+            return;
+        };
 
         self.frame = self.frame.wrapping_add(1);
 
-        // Update uniform
+        // Update uniform with shadow matrix
         let uniform = VolumetricFogUniform {
             inv_view_proj: self.inv_view_proj,
+            shadow_matrix: self.shadow_matrix,
             camera_pos: [self.camera_pos[0], self.camera_pos[1], self.camera_pos[2], 1.0],
             light_dir: [
                 self.light_dir[0],
@@ -514,11 +599,22 @@ impl VolumetricFogPass {
                 1.0 / self.width as f32,
                 1.0 / self.height as f32,
             ],
-            near_far: [self.near, self.far, 0.0, 0.0],
+            near_far: [
+                self.near,
+                self.far,
+                self.settings.scattering_g,
+                self.settings.shadow_bias,
+            ],
+            shadow_params: [
+                if self.settings.use_shadow_map { 1.0 } else { 0.0 },
+                self.shadow_map_size,
+                1.0 / self.shadow_map_size,
+                0.0,
+            ],
         };
         queue.write_buffer(uniform_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // Create bind group
+        // Create bind group with shadow map
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Volumetric Fog Bind Group"),
             layout: bind_group_layout,
@@ -533,14 +629,22 @@ impl VolumetricFogPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(linear_sampler),
+                    resource: wgpu::BindingResource::TextureView(shadow_map_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::Sampler(point_sampler),
+                    resource: wgpu::BindingResource::Sampler(linear_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::Sampler(point_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
@@ -575,7 +679,7 @@ impl Default for VolumetricFogPass {
     }
 }
 
-// Volumetric fog shader
+// Volumetric fog shader with shadow-aware god rays
 const VOLUMETRIC_FOG_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -589,6 +693,7 @@ struct VertexOutput {
 
 struct Params {
     inv_view_proj: mat4x4<f32>,
+    shadow_matrix: mat4x4<f32>,
     camera_pos: vec4<f32>,
     light_dir: vec4<f32>,       // xyz = direction, w = intensity
     light_color: vec4<f32>,     // rgb = color, w = god_rays_enabled
@@ -596,14 +701,19 @@ struct Params {
     fog_params: vec4<f32>,      // start, end, height_falloff, base_height
     scatter_params: vec4<f32>,  // scattering, absorption, god_ray_intensity, god_ray_decay
     render_params: vec4<f32>,   // step_count, frame, 1/width, 1/height
-    near_far: vec4<f32>,        // near, far, 0, 0
+    near_far: vec4<f32>,        // near, far, scattering_g, shadow_bias
+    shadow_params: vec4<f32>,   // use_shadow_map, shadow_map_size, 1/shadow_map_size, padding
 }
 
 @group(0) @binding(0) var scene_texture: texture_2d<f32>;
 @group(0) @binding(1) var depth_texture: texture_depth_2d;
-@group(0) @binding(2) var linear_sampler: sampler;
-@group(0) @binding(3) var point_sampler: sampler;
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(2) var shadow_map: texture_depth_2d;
+@group(0) @binding(3) var linear_sampler: sampler;
+@group(0) @binding(4) var point_sampler: sampler;
+@group(0) @binding(5) var shadow_sampler: sampler;
+@group(0) @binding(6) var<uniform> params: Params;
+
+const PI: f32 = 3.14159265359;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -629,10 +739,11 @@ fn get_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 }
 
 // Henyey-Greenstein phase function for anisotropic scattering
+// g > 0: forward scattering (sun shafts), g < 0: back scattering
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g2 = g * g;
     let denom = 1.0 + g2 - 2.0 * g * cos_theta;
-    return (1.0 - g2) / (4.0 * 3.14159265 * pow(denom, 1.5));
+    return (1.0 - g2) / (4.0 * PI * pow(max(denom, 0.0001), 1.5));
 }
 
 // Interleaved gradient noise for dithering
@@ -654,15 +765,63 @@ fn get_fog_density(pos: vec3<f32>) -> f32 {
     return base_density * height_factor;
 }
 
+// Sample shadow map to determine if point is lit
+// Uses manual depth comparison to avoid textureSampleCompare uniform control flow requirement
+fn sample_shadow(world_pos: vec3<f32>) -> f32 {
+    let use_shadow = params.shadow_params.x > 0.5;
+    let shadow_bias = params.near_far.w;
+
+    // Transform world position to shadow map space
+    let light_space = params.shadow_matrix * vec4<f32>(world_pos, 1.0);
+    let shadow_ndc = light_space.xyz / light_space.w;
+
+    // Convert to UV coordinates (0 to 1 range)
+    let shadow_uv = vec2<f32>(
+        shadow_ndc.x * 0.5 + 0.5,
+        0.5 - shadow_ndc.y * 0.5  // Flip Y for texture coordinates
+    );
+
+    // Check if within shadow map bounds (no early return - use mask)
+    let in_bounds = shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
+                    shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
+                    shadow_ndc.z >= 0.0 && shadow_ndc.z <= 1.0;
+
+    // Clamp UV to valid range for sampling
+    let safe_uv = clamp(shadow_uv, vec2<f32>(0.001), vec2<f32>(0.999));
+
+    // Current depth with bias
+    let current_depth = shadow_ndc.z - shadow_bias;
+
+    // Simple 2x2 PCF with manual comparison
+    let texel_size = params.shadow_params.z;
+
+    // Sample shadow depths and compare manually (level must be i32 for depth textures)
+    let d0 = textureSampleLevel(shadow_map, shadow_sampler, safe_uv + vec2<f32>(-texel_size, -texel_size), 0);
+    let d1 = textureSampleLevel(shadow_map, shadow_sampler, safe_uv + vec2<f32>(texel_size, -texel_size), 0);
+    let d2 = textureSampleLevel(shadow_map, shadow_sampler, safe_uv + vec2<f32>(-texel_size, texel_size), 0);
+    let d3 = textureSampleLevel(shadow_map, shadow_sampler, safe_uv + vec2<f32>(texel_size, texel_size), 0);
+
+    // Manual depth comparison (1.0 if lit, 0.0 if in shadow)
+    let s0 = select(0.0, 1.0, current_depth <= d0);
+    let s1 = select(0.0, 1.0, current_depth <= d1);
+    let s2 = select(0.0, 1.0, current_depth <= d2);
+    let s3 = select(0.0, 1.0, current_depth <= d3);
+
+    let shadow = (s0 + s1 + s2 + s3) * 0.25;
+
+    // Apply masks: if shadow disabled or out of bounds, return 1.0 (fully lit)
+    let result = select(1.0, shadow, use_shadow && in_bounds);
+
+    return result;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let scene_color = textureSampleLevel(scene_texture, linear_sampler, in.uv, 0.0).rgb;
     let depth = textureSampleLevel(depth_texture, point_sampler, in.uv, 0);
 
-    // Skip sky
-    if (depth >= 0.9999) {
-        return vec4<f32>(scene_color, 1.0);
-    }
+    // Check if we should skip fog (sky or too close)
+    let is_sky = depth >= 0.9999;
 
     let world_pos = get_world_pos(in.uv, depth);
     let camera_pos = params.camera_pos.xyz;
@@ -674,15 +833,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let start_dist = params.fog_params.x;
     let end_dist = min(params.fog_params.y, scene_distance);
 
-    // Early out if scene is before fog starts
-    if (scene_distance < start_dist) {
-        return vec4<f32>(scene_color, 1.0);
-    }
+    // Check if scene is before fog starts
+    let too_close = scene_distance < start_dist;
 
-    let march_distance = end_dist - start_dist;
+    // Skip fog computation entirely via uniform branch
+    let skip_fog = is_sky || too_close;
+    let march_distance = select(end_dist - start_dist, 0.0, skip_fog);
     let step_size = march_distance / f32(step_count);
 
-    // Jitter start position for temporal stability
+    // Jitter start position for temporal stability (reduces banding)
     let noise = interleaved_gradient_noise(in.position.xy, params.render_params.y);
     let jitter = noise * step_size;
 
@@ -692,6 +851,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let light_color = params.light_color.rgb;
     let god_rays_enabled = params.light_color.w > 0.5;
     let god_ray_intensity = params.scatter_params.z;
+    let scattering_g = params.near_far.z;
 
     // Scattering parameters
     let scattering = params.scatter_params.x;
@@ -701,52 +861,51 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Fog color
     let fog_color = params.fog_color.rgb;
 
+    // Phase function (constant for directional light)
+    let cos_theta = dot(ray_dir, -light_dir);
+    let phase = henyey_greenstein(cos_theta, scattering_g);
+
     // Accumulate fog
     var transmittance = 1.0;
     var in_scatter = vec3<f32>(0.0);
 
-    for (var i = 0; i < step_count; i++) {
+    // Use effective step count (0 when skipping fog)
+    let effective_steps = select(step_count, 0, skip_fog);
+
+    for (var i = 0; i < effective_steps; i++) {
         let t = start_dist + jitter + f32(i) * step_size;
         let sample_pos = camera_pos + ray_dir * t;
 
         // Get local density
         let density = get_fog_density(sample_pos);
 
-        if (density > 0.001) {
-            // Beer-Lambert extinction
-            let sample_extinction = extinction * density * step_size;
-            let sample_transmittance = exp(-sample_extinction);
+        // Always sample shadow to maintain uniform control flow
+        // (textureSampleCompare requires uniform control flow)
+        let shadow_val = sample_shadow(sample_pos);
 
-            // In-scattering from light
-            var light_scatter = vec3<f32>(0.0);
+        // Apply density threshold via multiplication instead of branching
+        let has_density = select(0.0, 1.0, density > 0.001);
 
-            if (god_rays_enabled) {
-                // Phase function for directional scattering
-                let cos_theta = dot(ray_dir, -light_dir);
-                let phase = henyey_greenstein(cos_theta, 0.5); // g=0.5 for forward scattering
+        // Beer-Lambert extinction
+        let sample_extinction = extinction * density * step_size;
+        let sample_transmittance = exp(-sample_extinction * has_density);
 
-                // Light contribution (simplified - no shadow check for performance)
-                light_scatter = light_color * light_intensity * phase * god_ray_intensity;
-            }
+        // In-scattering from light
+        let god_ray_factor = select(0.0, 1.0, god_rays_enabled);
+        let light_scatter = light_color * light_intensity * phase * god_ray_intensity * shadow_val * god_ray_factor;
 
-            // Add ambient fog color
-            let ambient_scatter = fog_color * 0.3;
+        // Add ambient fog color (always present, creates base fog)
+        let ambient_scatter = fog_color * 0.3;
 
-            // Integrate in-scattering
-            let scatter_contrib = (light_scatter + ambient_scatter) * scattering * density * step_size;
-            in_scatter += scatter_contrib * transmittance;
+        // Integrate in-scattering (masked by density)
+        let scatter_contrib = (light_scatter + ambient_scatter) * scattering * density * step_size * has_density;
+        in_scatter += scatter_contrib * transmittance;
 
-            // Update transmittance
-            transmittance *= sample_transmittance;
-
-            // Early out if fully opaque
-            if (transmittance < 0.01) {
-                break;
-            }
-        }
+        // Update transmittance
+        transmittance *= sample_transmittance;
     }
 
-    // Combine with scene
+    // Combine with scene (skip_fog will have transmittance=1, in_scatter=0)
     let final_color = scene_color * transmittance + in_scatter;
 
     return vec4<f32>(final_color, 1.0);

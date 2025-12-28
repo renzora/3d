@@ -388,7 +388,7 @@ impl LumenPass {
                 ],
             }));
 
-        // Probe bind group layout (matches probe_volume.rs layout)
+        // Probe bind group layout (must match probe_volume.rs layout exactly)
         // Group 1: SH probe data + grid info
         self.probe_bind_group_layout =
             Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -397,7 +397,7 @@ impl LumenPass {
                     // Probe SH Data (Storage, read-only)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -408,7 +408,7 @@ impl LumenPass {
                     // Grid Info (Uniform)
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
