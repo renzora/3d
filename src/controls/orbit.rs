@@ -136,6 +136,22 @@ impl OrbitControls {
         self.pan_offset = self.pan_offset + right * (-pan_x) + up * pan_y;
     }
 
+    /// Translate camera in world space (WASD + QE movement).
+    /// forward/right/up are in camera-relative directions.
+    pub fn translate(&mut self, forward: f32, right: f32, up: f32, camera: &PerspectiveCamera) {
+        let position = camera.position;
+        let cam_forward = (self.target - position).normalized();
+        let cam_right = cam_forward.cross(&Vector3::UP).normalized();
+        let cam_up = Vector3::UP;
+
+        let move_speed = self.pan_speed * 0.05;
+        let movement = cam_forward * forward * move_speed
+            + cam_right * right * move_speed
+            + cam_up * up * move_speed;
+
+        self.pan_offset = self.pan_offset + movement;
+    }
+
     /// Zoom in/out.
     pub fn zoom(&mut self, delta: f32) {
         if self.enable_zoom {

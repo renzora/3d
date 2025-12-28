@@ -1850,6 +1850,15 @@ impl RenApp {
         controls.zoom_by_wheel(delta);
     }
 
+    /// Handle keyboard movement (WASD + QE).
+    /// forward: W/S, right: A/D, up: Q/E
+    #[wasm_bindgen]
+    pub fn on_keyboard_move(&self, forward: f32, right: f32, up: f32) {
+        let mut controls = self.controls.borrow_mut();
+        let camera = self.camera.borrow();
+        controls.translate(forward, right, up, &camera);
+    }
+
     /// Load a GLTF/GLB model from bytes.
     #[wasm_bindgen]
     pub fn load_gltf(&mut self, data: &[u8]) -> Result<u32, JsValue> {

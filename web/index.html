@@ -897,9 +897,22 @@
                 let lastTime = performance.now();
                 let frameCount = 0;
                 let fps = 0;
+                const keysPressed = {};
 
                 // Animation loop
                 function frame() {
+                    // Handle keyboard movement (WASD + QE)
+                    let forward = 0, right = 0, up = 0;
+                    if (keysPressed['KeyW']) forward += 1;
+                    if (keysPressed['KeyS']) forward -= 1;
+                    if (keysPressed['KeyA']) right -= 1;
+                    if (keysPressed['KeyD']) right += 1;
+                    if (keysPressed['KeyE']) up += 1;
+                    if (keysPressed['KeyQ']) up -= 1;
+                    if (forward !== 0 || right !== 0 || up !== 0) {
+                        app.on_keyboard_move(forward, right, up);
+                    }
+
                     app.frame();
                     frameCount++;
 
@@ -972,6 +985,16 @@
                 }, { passive: false });
 
                 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+                // Keyboard controls (WASD + QE)
+                window.addEventListener('keydown', (e) => {
+                    // Don't capture keys when typing in inputs
+                    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+                    keysPressed[e.code] = true;
+                });
+                window.addEventListener('keyup', (e) => {
+                    keysPressed[e.code] = false;
+                });
 
                 // Model loading
                 const modelInput = document.getElementById('model-input');
