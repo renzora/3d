@@ -409,6 +409,24 @@ impl TexturedPbrMaterial {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Detail normal map for micro-surface detail (binding 17)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 17,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Detail normal sampler (binding 18)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 18,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -524,7 +542,8 @@ impl TexturedPbrMaterial {
         self.needs_update = false;
     }
 
-    /// Create a combined texture + shadow + environment + BRDF LUT + irradiance bind group.
+    /// Create a combined texture + shadow + environment + BRDF LUT + irradiance + detail bind group.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_texture_shadow_bind_group(
         &self,
         device: &wgpu::Device,
@@ -545,10 +564,12 @@ impl TexturedPbrMaterial {
         brdf_lut_sampler: &wgpu::Sampler,
         irradiance_view: &wgpu::TextureView,
         irradiance_sampler: &wgpu::Sampler,
+        detail_normal_view: &wgpu::TextureView,
+        detail_normal_sampler: &wgpu::Sampler,
     ) -> Option<wgpu::BindGroup> {
         self.texture_bind_group_layout.as_ref().map(|layout| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Textured PBR Texture+Shadow+Env+BRDF Bind Group"),
+                label: Some("Textured PBR Texture+Shadow+Env+BRDF+Detail Bind Group"),
                 layout,
                 entries: &[
                     // Textures (bindings 0-5)
@@ -624,6 +645,15 @@ impl TexturedPbrMaterial {
                     wgpu::BindGroupEntry {
                         binding: 16,
                         resource: wgpu::BindingResource::Sampler(irradiance_sampler),
+                    },
+                    // Detail normal map (bindings 17-18)
+                    wgpu::BindGroupEntry {
+                        binding: 17,
+                        resource: wgpu::BindingResource::TextureView(detail_normal_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 18,
+                        resource: wgpu::BindingResource::Sampler(detail_normal_sampler),
                     },
                 ],
             })

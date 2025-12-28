@@ -23,6 +23,8 @@ struct CameraUniform {
     light2_color: vec4<f32>,
     light3_pos: vec4<f32>,
     light3_color: vec4<f32>,
+    // Detail mapping: x=enabled (0/1), y=scale (UV tiling), z=intensity, w=max_distance
+    detail_settings: vec4<f32>,
 }
 
 struct ShadowUniform {
@@ -111,6 +113,12 @@ var irradiance_map: texture_cube<f32>;
 @group(3) @binding(16)
 var irradiance_sampler: sampler;
 
+// Detail normal map for micro-surface detail (tiling noise texture)
+@group(3) @binding(17)
+var detail_normal_map: texture_2d<f32>;
+@group(3) @binding(18)
+var detail_normal_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -154,6 +162,72 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // Fresnel-Schlick approximation
 fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Blend detail normal with base normal using UDN (Unreal Derivative Normal) blending
+// This produces higher quality results than simple linear blending
+fn blend_normals_udn(base: vec3<f32>, detail: vec3<f32>) -> vec3<f32> {
+    // UDN blending: base.xy + detail.xy, base.z * detail.z
+    let blended = vec3<f32>(
+        base.xy + detail.xy,
+        base.z * detail.z
+    );
+    return normalize(blended);
+}
+
+// Sample and apply detail normal map
+// Returns the modified normal in tangent space
+fn apply_detail_normal(
+    base_normal: vec3<f32>,
+    world_pos: vec3<f32>,
+    uv: vec2<f32>,
+    tangent: vec3<f32>,
+    bitangent: vec3<f32>,
+) -> vec3<f32> {
+    // Get settings
+    let enabled = camera.detail_settings.x;
+    let scale = camera.detail_settings.y;      // UV tiling scale
+    let intensity = camera.detail_settings.z;  // Blend intensity
+    let max_distance = camera.detail_settings.w; // Fade distance
+
+    // Always sample the texture first (required for uniform control flow)
+    let detail_uv = uv * scale;
+    let detail_sample = textureSample(detail_normal_map, detail_normal_sampler, detail_uv).rgb;
+
+    // Calculate distance from camera for LOD fade
+    let view_distance = length(camera.position - world_pos);
+    let distance_fade = saturate(1.0 - view_distance / max_distance);
+
+    // Compute effective blend factor (0 if disabled or too far)
+    let blend_factor = enabled * intensity * distance_fade;
+
+    // If no blending needed, return base normal
+    if (blend_factor <= 0.001) {
+        return base_normal;
+    }
+
+    // Convert from [0,1] to [-1,1] range
+    let detail_normal_raw = detail_sample * 2.0 - 1.0;
+
+    // Blend detail normal with flat normal based on blend factor
+    let detail_normal = mix(vec3<f32>(0.0, 0.0, 1.0), detail_normal_raw, blend_factor);
+
+    // Build TBN matrix for the base normal
+    let tbn = mat3x3<f32>(
+        normalize(tangent),
+        normalize(bitangent),
+        base_normal
+    );
+
+    // Transform detail normal from tangent space and blend with base
+    // The detail normal perturbs the base normal in tangent space
+    let blended = blend_normals_udn(
+        vec3<f32>(0.0, 0.0, 1.0), // Base as "up" in tangent space
+        detail_normal
+    );
+
+    // Transform blended result back to world space
+    return normalize(tbn * blended);
 }
 
 // GGX/Trowbridge-Reitz normal distribution function
@@ -423,8 +497,19 @@ fn calculate_shadow_pcss(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3
 
 // ============ Contact Shadows (Screen-Space Ray Marching) ============
 
+// Interleaved gradient noise for contact shadow dithering
+fn interleaved_gradient_noise_contact(pos: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pos, magic.xy)));
+}
+
 // Ray march in screen space to find contact shadows
 // Contact shadows add fine shadow detail at object contact points that shadow maps miss
+// Enhanced version with:
+// - More steps (16) for better coverage
+// - Dithered starting offset to reduce banding
+// - Exponential step distribution (smaller steps near contact point)
+// - Smooth occlusion falloff
 fn calculate_contact_shadow(
     world_pos: vec3<f32>,
     normal: vec3<f32>,
@@ -442,19 +527,30 @@ fn calculate_contact_shadow(
     let thickness = shadow.contact_params.z;
     let intensity = shadow.contact_params.w;
 
-    // Number of ray march steps (8 steps for performance)
-    let num_steps = 8u;
-    let step_size = max_distance / f32(num_steps);
+    // Use 16 steps for better quality
+    let num_steps = 16u;
+
+    // Dithering offset to reduce banding artifacts
+    let dither = interleaved_gradient_noise_contact(screen_pos) * 0.5;
 
     // Start position slightly offset along normal to prevent self-shadowing
-    var ray_pos = world_pos + normal * 0.01;
+    var ray_pos = world_pos + normal * 0.005;
 
-    // March along the light direction
+    // March along the light direction with exponential step distribution
+    // Smaller steps near the surface, larger steps farther away
     var occlusion = 0.0;
+    var total_distance = 0.0;
 
     for (var i = 0u; i < num_steps; i++) {
+        // Exponential step distribution: t goes from 0 to 1
+        let t = (f32(i) + dither) / f32(num_steps);
+        // Use quadratic distribution for more samples near contact
+        let target_dist = t * t * max_distance;
+        let step_dist = target_dist - total_distance;
+        total_distance = target_dist;
+
         // Move ray toward light
-        ray_pos += light_dir * step_size;
+        ray_pos += light_dir * step_dist;
 
         // Transform ray position to clip space
         let clip_pos = camera.view_proj * vec4<f32>(ray_pos, 1.0);
@@ -471,19 +567,25 @@ fn calculate_contact_shadow(
         // The ray depth in clip space (0 = near, 1 = far for WebGPU)
         let ray_depth = ndc.z;
 
-        // Sample depth buffer at ray position
-        // We use the shadow map as a proxy for the depth buffer
-        // In a full implementation, we'd have access to the scene depth buffer
-        // For now, we check against the starting depth with thickness tolerance
+        // Check against the starting depth with thickness tolerance
         let depth_diff = ray_depth - depth;
 
         // If ray is behind geometry (positive diff) but within thickness, it's occluded
         if (depth_diff > 0.0 && depth_diff < thickness) {
-            // Fade occlusion based on distance traveled
-            let fade = 1.0 - f32(i) / f32(num_steps);
-            occlusion = max(occlusion, fade);
+            // Smooth occlusion falloff based on:
+            // 1. Distance traveled (farther = less occlusion)
+            // 2. Depth penetration (deeper = more occlusion)
+            let distance_fade = 1.0 - (total_distance / max_distance);
+            let depth_fade = 1.0 - (depth_diff / thickness);
+            let combined_fade = distance_fade * depth_fade;
+
+            // Use soft maximum for smooth accumulation
+            occlusion = max(occlusion, combined_fade);
         }
     }
+
+    // Apply smoothstep for softer shadow edges
+    occlusion = smoothstep(0.0, 1.0, occlusion);
 
     // Apply intensity and return shadow factor
     return 1.0 - occlusion * intensity;
@@ -713,6 +815,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
         n = normalize(tbn * tangent_normal);
     }
+
+    // Apply detail normal mapping for micro-surface detail at close range
+    n = apply_detail_normal(n, in.world_position, in.uv, in.tangent, in.bitangent);
 
     let ao = material.ao;
     let v = normalize(camera.position - in.world_position);

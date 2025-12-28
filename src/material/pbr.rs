@@ -37,6 +37,8 @@ pub struct PbrCameraUniform {
     pub light3_pos: [f32; 4],
     /// Light 3: color.rgb + enabled.w
     pub light3_color: [f32; 4],
+    /// Detail mapping: x=enabled (0/1), y=scale (UV tiling), z=intensity, w=max_distance
+    pub detail_settings: [f32; 4],
 }
 
 impl Default for PbrCameraUniform {
@@ -57,6 +59,8 @@ impl Default for PbrCameraUniform {
             light2_color: [1.0, 1.0, 1.0, 1.0],     // Pure white, enabled
             light3_pos: [-3.0, 1.0, -3.0, 5.0],     // Ground bounce: low, back-left, intensity 5
             light3_color: [0.8, 0.85, 0.9, 1.0],    // Slight blue, enabled
+            // Detail mapping: disabled by default, scale=10 (tiles 10x), intensity=0.3, max_distance=5
+            detail_settings: [0.0, 10.0, 0.3, 5.0],
         }
     }
 }

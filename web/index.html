@@ -470,18 +470,18 @@
                     <div id="contact-shadow-controls">
                         <label>
                             Distance
-                            <input type="range" id="contact-shadow-distance" min="0.1" max="2.0" step="0.05" value="0.5">
-                            <span class="value" id="contact-shadow-distance-val">0.5</span>
+                            <input type="range" id="contact-shadow-distance" min="0.1" max="5.0" step="0.1" value="1.0">
+                            <span class="value" id="contact-shadow-distance-val">1.0</span>
                         </label>
                         <label>
                             Thickness
-                            <input type="range" id="contact-shadow-thickness" min="0.01" max="0.5" step="0.01" value="0.05">
-                            <span class="value" id="contact-shadow-thickness-val">0.05</span>
+                            <input type="range" id="contact-shadow-thickness" min="0.01" max="1.0" step="0.01" value="0.1">
+                            <span class="value" id="contact-shadow-thickness-val">0.1</span>
                         </label>
                         <label>
                             Intensity
-                            <input type="range" id="contact-shadow-intensity" min="0" max="1" step="0.05" value="0.5">
-                            <span class="value" id="contact-shadow-intensity-val">0.5</span>
+                            <input type="range" id="contact-shadow-intensity" min="0" max="1" step="0.05" value="0.8">
+                            <span class="value" id="contact-shadow-intensity-val">0.8</span>
                         </label>
                     </div>
                 </div>
@@ -898,6 +898,29 @@
                     <span class="value" id="ibl-specular-val">1.0</span>
                 </label>
                 <button id="ibl-reset" style="margin-top: 5px; padding: 5px 10px; background: #444; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Reset IBL</button>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Detail Mapping</h3>
+                <label class="toggle">
+                    <input type="checkbox" id="detail-enabled">
+                    Enable Detail Normals
+                </label>
+                <label>
+                    Scale (Tiling)
+                    <input type="range" id="detail-scale" min="1" max="50" step="1" value="10">
+                    <span class="value" id="detail-scale-val">10</span>
+                </label>
+                <label>
+                    Intensity
+                    <input type="range" id="detail-intensity" min="0" max="1" step="0.05" value="0.3">
+                    <span class="value" id="detail-intensity-val">0.3</span>
+                </label>
+                <label>
+                    Max Distance
+                    <input type="range" id="detail-max-distance" min="1" max="50" step="1" value="5">
+                    <span class="value" id="detail-max-distance-val">5</span>
+                </label>
             </div>
             <hr class="divider">
             <div class="section">
@@ -1799,6 +1822,30 @@
                     saveSettings();
                 });
 
+                // ============ Detail Mapping ============
+                document.getElementById('detail-enabled').addEventListener('change', (e) => {
+                    if (app.set_detail_enabled) app.set_detail_enabled(e.target.checked);
+                    saveSettings();
+                });
+                document.getElementById('detail-scale').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_detail_scale) app.set_detail_scale(val);
+                    document.getElementById('detail-scale-val').textContent = val.toFixed(0);
+                    saveSettings();
+                });
+                document.getElementById('detail-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_detail_intensity) app.set_detail_intensity(val);
+                    document.getElementById('detail-intensity-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+                document.getElementById('detail-max-distance').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_detail_max_distance) app.set_detail_max_distance(val);
+                    document.getElementById('detail-max-distance-val').textContent = val.toFixed(0);
+                    saveSettings();
+                });
+
                 // ============ Scene Lights ============
                 function setupLightControls(index) {
                     const prefix = `light${index}`;
@@ -1958,6 +2005,11 @@
                         // IBL
                         iblDiffuse: document.getElementById('ibl-diffuse').value,
                         iblSpecular: document.getElementById('ibl-specular').value,
+                        // Detail Mapping
+                        detailEnabled: document.getElementById('detail-enabled').checked,
+                        detailScale: document.getElementById('detail-scale').value,
+                        detailIntensity: document.getElementById('detail-intensity').value,
+                        detailMaxDistance: document.getElementById('detail-max-distance').value,
                         // AA
                         aaMode: document.getElementById('aa-mode').value,
                         fxaaQuality: document.getElementById('fxaa-quality').value,
@@ -2072,6 +2124,10 @@
                         setVal('fog-godray-intensity', s.fogGodrayIntensity, 'fog-godray-intensity-val');
                         setVal('ibl-diffuse', s.iblDiffuse, 'ibl-diffuse-val');
                         setVal('ibl-specular', s.iblSpecular, 'ibl-specular-val');
+                        setVal('detail-enabled', s.detailEnabled);
+                        setVal('detail-scale', s.detailScale, 'detail-scale-val');
+                        setVal('detail-intensity', s.detailIntensity, 'detail-intensity-val');
+                        setVal('detail-max-distance', s.detailMaxDistance, 'detail-max-distance-val');
                         setVal('aa-mode', s.aaMode);
                         setVal('fxaa-quality', s.fxaaQuality);
                         setVal('smaa-quality', s.smaaQuality);
@@ -2158,6 +2214,10 @@
                     if (app.set_volumetric_fog_god_ray_intensity) app.set_volumetric_fog_god_ray_intensity(parseFloat(document.getElementById('fog-godray-intensity').value));
                     if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(parseFloat(document.getElementById('ibl-diffuse').value));
                     if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(parseFloat(document.getElementById('ibl-specular').value));
+                    if (app.set_detail_enabled) app.set_detail_enabled(document.getElementById('detail-enabled').checked);
+                    if (app.set_detail_scale) app.set_detail_scale(parseFloat(document.getElementById('detail-scale').value));
+                    if (app.set_detail_intensity) app.set_detail_intensity(parseFloat(document.getElementById('detail-intensity').value));
+                    if (app.set_detail_max_distance) app.set_detail_max_distance(parseFloat(document.getElementById('detail-max-distance').value));
                     app.set_aa_mode(parseInt(document.getElementById('aa-mode').value));
                     app.set_fxaa_quality(parseInt(document.getElementById('fxaa-quality').value));
                     app.set_smaa_quality(parseInt(document.getElementById('smaa-quality').value));

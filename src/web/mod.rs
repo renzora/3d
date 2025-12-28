@@ -239,6 +239,13 @@ pub struct RenApp {
     irradiance_view: wgpu::TextureView,
     // BRDF Look-Up Table for IBL
     brdf_lut: BrdfLut,
+    // Detail normal map for micro-surface detail
+    detail_normal_map: crate::texture::DetailNormalMap,
+    // Detail mapping settings: enabled, scale, intensity, max_distance
+    detail_enabled: bool,
+    detail_scale: f32,
+    detail_intensity: f32,
+    detail_max_distance: f32,
     // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat
     render_mode: u32,
     // Wireframe rendering
@@ -402,6 +409,7 @@ impl RenApp {
             light2_color: [1.0, 1.0, 1.0, 1.0],
             light3_pos: [-3.0, 1.0, -3.0, 5.0],
             light3_color: [0.8, 0.85, 0.9, 1.0],
+            detail_settings: [0.0, 10.0, 0.3, 5.0],  // Disabled by default
         };
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -738,6 +746,10 @@ impl RenApp {
         // Generate BRDF Look-Up Table for proper IBL split-sum approximation
         let brdf_lut = BrdfLut::new(&device, &queue);
 
+        // ========== Detail Normal Map ==========
+        // Generate procedural detail normal map for micro-surface detail
+        let detail_normal_map = crate::texture::DetailNormalMap::new(&device, &queue);
+
         // ========== Prefiltered Environment Map ==========
         // Generate prefiltered cubemap for roughness-based IBL specular
         // Each mip level is convolved for increasing roughness
@@ -1003,6 +1015,11 @@ impl RenApp {
             irradiance_texture,
             irradiance_view,
             brdf_lut,
+            detail_normal_map,
+            detail_enabled: false,
+            detail_scale: 10.0,
+            detail_intensity: 0.3,
+            detail_max_distance: 5.0,
             render_mode: 0,
             wireframe_supported,
             wireframe_enabled: false,
@@ -1118,6 +1135,12 @@ impl RenApp {
                 light2_color: [self.lights[2][4], self.lights[2][5], self.lights[2][6], self.lights[2][7]],
                 light3_pos: [self.lights[3][0], self.lights[3][1], self.lights[3][2], self.lights[3][3]],
                 light3_color: [self.lights[3][4], self.lights[3][5], self.lights[3][6], self.lights[3][7]],
+                detail_settings: [
+                    if self.detail_enabled { 1.0 } else { 0.0 },
+                    self.detail_scale,
+                    self.detail_intensity,
+                    self.detail_max_distance,
+                ],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
@@ -1925,6 +1948,12 @@ impl RenApp {
                 light2_color: [self.lights[2][4], self.lights[2][5], self.lights[2][6], self.lights[2][7]],
                 light3_pos: [self.lights[3][0], self.lights[3][1], self.lights[3][2], self.lights[3][3]],
                 light3_color: [self.lights[3][4], self.lights[3][5], self.lights[3][6], self.lights[3][7]],
+                detail_settings: [
+                    if self.detail_enabled { 1.0 } else { 0.0 },
+                    self.detail_scale,
+                    self.detail_intensity,
+                    self.detail_max_distance,
+                ],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
         }
@@ -2166,7 +2195,7 @@ impl RenApp {
                 .and_then(|n| gpu_textures.get(n))
                 .unwrap_or(&self.white_texture);
 
-            // Create combined texture + shadow + env + BRDF + irradiance bind group
+            // Create combined texture + shadow + env + BRDF + irradiance + detail bind group
             let texture_bind_group = self.material
                 .create_texture_shadow_bind_group(
                     &self.device,
@@ -2187,6 +2216,8 @@ impl RenApp {
                     self.brdf_lut.sampler(),
                     &self.irradiance_view,
                     &self.skybox_sampler,
+                    self.detail_normal_map.view(),
+                    self.detail_normal_map.sampler(),
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -2678,6 +2709,31 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_ibl_specular_intensity(&mut self, intensity: f32) {
         self.ibl_specular_intensity = intensity;
+    }
+
+    /// Enable or disable detail mapping for micro-surface detail.
+    #[wasm_bindgen]
+    pub fn set_detail_enabled(&mut self, enabled: bool) {
+        self.detail_enabled = enabled;
+    }
+
+    /// Set detail mapping UV scale (tiling frequency).
+    /// Higher values = more tiling = finer detail.
+    #[wasm_bindgen]
+    pub fn set_detail_scale(&mut self, scale: f32) {
+        self.detail_scale = scale.clamp(1.0, 50.0);
+    }
+
+    /// Set detail mapping intensity (blend strength).
+    #[wasm_bindgen]
+    pub fn set_detail_intensity(&mut self, intensity: f32) {
+        self.detail_intensity = intensity.clamp(0.0, 1.0);
+    }
+
+    /// Set detail mapping maximum distance (fade out distance).
+    #[wasm_bindgen]
+    pub fn set_detail_max_distance(&mut self, distance: f32) {
+        self.detail_max_distance = distance.clamp(1.0, 50.0);
     }
 
     /// Set light position (index 0-3).
@@ -3793,7 +3849,7 @@ impl RenApp {
             _padding: [0.0; 2],
         };
 
-        // Create combined texture + shadow + env + BRDF + irradiance bind group with default textures
+        // Create combined texture + shadow + env + BRDF + irradiance + detail bind group with default textures
         let texture_bind_group = self.material
             .create_texture_shadow_bind_group(
                 &self.device,
@@ -3814,6 +3870,8 @@ impl RenApp {
                 self.brdf_lut.sampler(),
                 &self.irradiance_view,
                 &self.skybox_sampler,
+                self.detail_normal_map.view(),
+                self.detail_normal_map.sampler(),
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 

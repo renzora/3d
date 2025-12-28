@@ -152,10 +152,11 @@ impl Default for ContactShadowConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_distance: 0.5,
-            thickness: 0.05,
-            steps: 8,
-            intensity: 0.5,
+            // More aggressive defaults to hide shadow map gaps at object bases
+            max_distance: 1.0,    // Larger range for better coverage
+            thickness: 0.1,       // Slightly thicker for reliable occlusion
+            steps: 16,            // More steps for quality (matches shader)
+            intensity: 0.8,       // Stronger shadows
         }
     }
 }
@@ -174,19 +175,19 @@ impl ContactShadowConfig {
 
     /// Set maximum ray distance in world units.
     pub fn max_distance(mut self, distance: f32) -> Self {
-        self.max_distance = distance.clamp(0.1, 2.0);
+        self.max_distance = distance.clamp(0.1, 5.0);  // Allow larger range
         self
     }
 
     /// Set object thickness for ray marching.
     pub fn thickness(mut self, thickness: f32) -> Self {
-        self.thickness = thickness.clamp(0.01, 0.5);
+        self.thickness = thickness.clamp(0.01, 1.0);  // Allow thicker for aggressive coverage
         self
     }
 
     /// Set number of ray march steps.
     pub fn steps(mut self, steps: u32) -> Self {
-        self.steps = steps.clamp(4, 32);
+        self.steps = steps.clamp(4, 32);  // Note: shader uses fixed 16 steps
         self
     }
 
