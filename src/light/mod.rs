@@ -89,6 +89,29 @@ impl Default for HemisphereLightUniform {
     }
 }
 
+/// Render mode for debug visualization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RenderMode {
+    /// Standard PBR lit rendering.
+    #[default]
+    Lit = 0,
+    /// Unlit - base color only, no lighting.
+    Unlit = 1,
+    /// Visualize world-space normals.
+    Normals = 2,
+    /// Visualize depth buffer.
+    Depth = 3,
+    /// Visualize metallic value.
+    Metallic = 4,
+    /// Visualize roughness value.
+    Roughness = 5,
+    /// Visualize ambient occlusion.
+    AO = 6,
+    /// Visualize UV coordinates.
+    UVs = 7,
+}
+
 /// Lights uniform buffer containing all scene lights.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
@@ -101,8 +124,10 @@ pub struct LightsUniform {
     pub hemisphere_ground: [f32; 4],
     /// Number of active lights.
     pub num_lights: u32,
+    /// Render mode (0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs).
+    pub render_mode: u32,
     /// Padding (using u32 to match WGSL alignment).
-    pub _padding: [u32; 3],
+    pub _padding: [u32; 2],
     /// Array of lights.
     pub lights: [LightUniform; MAX_LIGHTS],
 }
@@ -114,7 +139,8 @@ impl Default for LightsUniform {
             hemisphere_sky: [0.6, 0.75, 1.0, 0.0],      // Disabled by default
             hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
             num_lights: 0,
-            _padding: [0; 3],
+            render_mode: 0,
+            _padding: [0; 2],
             lights: [LightUniform::default(); MAX_LIGHTS],
         }
     }

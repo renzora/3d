@@ -6,7 +6,8 @@ const PI: f32 = 3.14159265359;
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
-    _padding: f32,
+    // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs
+    render_mode: u32,
     // Hemisphere light: sky.rgb = sky color, sky.w = enabled (1.0 = on)
     hemisphere_sky: vec4<f32>,
     // Hemisphere light: ground.rgb = ground color, ground.w = intensity
@@ -114,6 +115,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) barycentric: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -123,6 +125,7 @@ struct VertexOutput {
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec3<f32>,
     @location(4) bitangent: vec3<f32>,
+    @location(5) barycentric: vec3<f32>,
 }
 
 @vertex
@@ -133,6 +136,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * world_pos;
     out.world_normal = normalize(model.normal * in.normal);
     out.uv = in.uv;
+    out.barycentric = in.barycentric;
 
     // Calculate tangent and bitangent for normal mapping
     // This is a simplified version - proper tangent should come from vertex data
@@ -761,6 +765,71 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (alpha < 0.1) {
         discard;
     }
+
+    // Handle render modes for debug visualization
+    // 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat, 9=Wireframe
+    let mode = camera.render_mode;
+
+    if (mode == 1u) {
+        // Unlit - base color with simple directional lighting (no PBR, no textures effects)
+        let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+        let ndotl = max(dot(n, light_dir), 0.0);
+        let ambient = 0.3;
+        let diffuse = ndotl * 0.7;
+        color = albedo * (ambient + diffuse);
+    } else if (mode == 2u) {
+        // Normals - visualize world-space normals (map from [-1,1] to [0,1])
+        color = n * 0.5 + 0.5;
+    } else if (mode == 3u) {
+        // Depth - visualize depth (using clip_position.z)
+        // Adjust for better visualization
+        let depth = pow(in.clip_position.z, 0.5); // Non-linear for better visualization
+        color = vec3<f32>(depth, depth, depth);
+    } else if (mode == 4u) {
+        // Metallic - visualize metallic value
+        color = vec3<f32>(metallic, metallic, metallic);
+    } else if (mode == 5u) {
+        // Roughness - visualize roughness value
+        color = vec3<f32>(roughness, roughness, roughness);
+    } else if (mode == 6u) {
+        // AO - visualize ambient occlusion
+        color = vec3<f32>(ao, ao, ao);
+    } else if (mode == 7u) {
+        // UVs - visualize UV coordinates
+        color = vec3<f32>(fract(in.uv.x), fract(in.uv.y), 0.0);
+    } else if (mode == 8u) {
+        // Flat - clay/matte look with simple lighting (no textures, neutral gray)
+        let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+        let ndotl = max(dot(n, light_dir), 0.0);
+        let ambient = 0.35;
+        let diffuse = ndotl * 0.65;
+        let clay_color = vec3<f32>(0.7, 0.7, 0.7);
+        color = clay_color * (ambient + diffuse);
+    } else if (mode == 9u) {
+        // True wireframe using barycentric coordinates
+        // Each vertex has a unique barycentric: (1,0,0), (0,1,0), (0,0,1)
+        // Near triangle edges, one component approaches 0
+        let bary = in.barycentric;
+
+        // Calculate edge proximity using screen-space derivatives for anti-aliasing
+        let d = fwidth(bary);
+
+        // Find the minimum barycentric coordinate (closest to an edge)
+        let min_bary = min(min(bary.x, bary.y), bary.z);
+
+        // Use the derivative to determine edge width (adaptive to screen space)
+        let min_d = min(min(d.x, d.y), d.z);
+        let edge_width = 1.0; // Line thickness in pixels
+
+        // Discard interior pixels - only keep edge pixels
+        if (min_bary > edge_width * min_d) {
+            discard;
+        }
+
+        // White lines only
+        color = vec3<f32>(1.0, 1.0, 1.0);
+    }
+    // mode == 0u is normal Lit rendering, already computed above
 
     // Output HDR values directly - tonemapping is done in post-processing
     // This allows values > 1.0 to trigger bloom effect

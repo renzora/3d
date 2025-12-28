@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Standard vertex with position, normal, and UV coordinates.
+/// Standard vertex with position, normal, UV coordinates, and barycentric coordinates.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct Vertex {
@@ -12,12 +12,35 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Texture coordinates.
     pub uv: [f32; 2],
+    /// Barycentric coordinates for wireframe rendering.
+    /// Each vertex of a triangle gets [1,0,0], [0,1,0], or [0,0,1].
+    pub barycentric: [f32; 3],
 }
 
 impl Vertex {
     /// Create a new vertex.
     pub const fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
-        Self { position, normal, uv }
+        Self {
+            position,
+            normal,
+            uv,
+            barycentric: [0.0, 0.0, 0.0], // Default, should be set per-triangle
+        }
+    }
+
+    /// Create a new vertex with barycentric coordinates.
+    pub const fn with_barycentric(
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        barycentric: [f32; 3],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            barycentric,
+        }
     }
 
     /// Get the vertex buffer layout for this vertex type.
@@ -30,7 +53,7 @@ impl Vertex {
     }
 
     /// Vertex attributes.
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
         // position
         wgpu::VertexAttribute {
             offset: 0,
@@ -48,6 +71,12 @@ impl Vertex {
             offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
             shader_location: 2,
             format: wgpu::VertexFormat::Float32x2,
+        },
+        // barycentric
+        wgpu::VertexAttribute {
+            offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+            shader_location: 3,
+            format: wgpu::VertexFormat::Float32x3,
         },
     ];
 }

@@ -16,13 +16,17 @@ impl GltfLoader {
 
     /// Load a GLTF/GLB file from bytes.
     pub fn load_from_bytes(&self, data: &[u8]) -> Result<LoadedScene, LoadError> {
-        let gltf = gltf::Gltf::from_slice(data)
+        // Try to strip extensionsRequired to be more lenient with unsupported extensions
+        let modified_data = self.strip_required_extensions(data);
+        let data_to_use = modified_data.as_deref().unwrap_or(data);
+
+        let (gltf, buffer_data, _images) = gltf::import_slice(data_to_use)
             .map_err(|e| LoadError::new(format!("Failed to parse GLTF: {}", e)))?;
 
         let mut scene = LoadedScene::new("GLTF Scene");
 
-        // Get buffer data
-        let buffers = self.load_buffers(&gltf, data)?;
+        // Convert buffer data to Vec<Vec<u8>>
+        let buffers: Vec<Vec<u8>> = buffer_data.iter().map(|b| b.0.clone()).collect();
 
         // Load materials
         for material in gltf.materials() {
@@ -82,44 +86,96 @@ impl GltfLoader {
         Ok(scene)
     }
 
-    /// Load buffer data from GLTF.
-    fn load_buffers(&self, gltf: &gltf::Gltf, _data: &[u8]) -> Result<Vec<Vec<u8>>, LoadError> {
-        let mut buffers = Vec::new();
+    /// Strip extensionsRequired from GLTF/GLB to allow loading files with unsupported extensions.
+    fn strip_required_extensions(&self, data: &[u8]) -> Option<Vec<u8>> {
+        // Check if it's a GLB file (magic bytes: "glTF")
+        if data.len() >= 4 && &data[0..4] == b"glTF" {
+            self.strip_extensions_from_glb(data)
+        } else {
+            // Assume it's JSON GLTF
+            self.strip_extensions_from_json(data)
+        }
+    }
 
-        for buffer in gltf.buffers() {
-            match buffer.source() {
-                gltf::buffer::Source::Bin => {
-                    // GLB embedded binary
-                    if let Some(blob) = gltf.blob.as_ref() {
-                        buffers.push(blob.clone());
-                    } else {
-                        return Err(LoadError::new("GLB missing binary data"));
-                    }
-                }
-                gltf::buffer::Source::Uri(uri) => {
-                    // Data URI or external file
-                    if uri.starts_with("data:") {
-                        // Base64 encoded data URI
-                        if let Some(base64_start) = uri.find(",") {
-                            let base64_data = &uri[base64_start + 1..];
-                            let decoded = base64_decode(base64_data)
-                                .map_err(|e| LoadError::new(format!("Failed to decode base64: {}", e)))?;
-                            buffers.push(decoded);
-                        } else {
-                            return Err(LoadError::new("Invalid data URI"));
-                        }
-                    } else {
-                        // External file - not supported in WASM without fetch
-                        return Err(LoadError::new(format!(
-                            "External buffer files not supported: {}",
-                            uri
-                        )));
-                    }
-                }
-            }
+    /// Strip extensionsRequired from GLB binary format.
+    fn strip_extensions_from_glb(&self, data: &[u8]) -> Option<Vec<u8>> {
+        if data.len() < 12 {
+            return None;
         }
 
-        Ok(buffers)
+        // GLB header: magic (4) + version (4) + length (4)
+        // Then chunks: length (4) + type (4) + data
+        let mut offset = 12;
+
+        // Find JSON chunk (type 0x4E4F534A = "JSON")
+        if data.len() < offset + 8 {
+            return None;
+        }
+
+        let json_length = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize;
+        let chunk_type = u32::from_le_bytes([data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]]);
+
+        if chunk_type != 0x4E4F534A {
+            return None; // Not JSON chunk
+        }
+
+        let json_start = offset + 8;
+        let json_end = json_start + json_length;
+
+        if data.len() < json_end {
+            return None;
+        }
+
+        let json_bytes = &data[json_start..json_end];
+        let modified_json = self.strip_extensions_from_json(json_bytes)?;
+
+        // Rebuild GLB with modified JSON
+        let new_json_length = modified_json.len();
+        // Pad to 4-byte alignment
+        let padded_length = (new_json_length + 3) & !3;
+        let padding = padded_length - new_json_length;
+
+        let mut result = Vec::with_capacity(data.len() + padding);
+
+        // Copy header
+        result.extend_from_slice(&data[0..8]);
+
+        // Update total length
+        let new_total_length = 12 + 8 + padded_length + (data.len() - json_end);
+        result.extend_from_slice(&(new_total_length as u32).to_le_bytes());
+
+        // Write new JSON chunk
+        result.extend_from_slice(&(padded_length as u32).to_le_bytes());
+        result.extend_from_slice(&0x4E4F534Au32.to_le_bytes()); // "JSON"
+        result.extend_from_slice(&modified_json);
+        result.extend(std::iter::repeat(0x20u8).take(padding)); // Space padding
+
+        // Copy remaining chunks (binary, etc.)
+        if json_end < data.len() {
+            result.extend_from_slice(&data[json_end..]);
+        }
+
+        Some(result)
+    }
+
+    /// Strip extensionsRequired from JSON GLTF.
+    fn strip_extensions_from_json(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let json_str = std::str::from_utf8(data).ok()?;
+
+        // Simple regex-like replacement to remove extensionsRequired
+        // Look for "extensionsRequired" : [...] and remove it
+        if !json_str.contains("extensionsRequired") {
+            return None; // No modification needed
+        }
+
+        // Parse as JSON value, modify, and serialize
+        let mut json: serde_json::Value = serde_json::from_str(json_str).ok()?;
+
+        if let Some(obj) = json.as_object_mut() {
+            obj.remove("extensionsRequired");
+        }
+
+        serde_json::to_vec(&json).ok()
     }
 
     /// Load a primitive as geometry.

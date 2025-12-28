@@ -222,6 +222,25 @@
         <!-- Lighting Tab -->
         <div class="tab-content active" id="tab-lighting">
             <div class="section">
+                <h3>Render Mode</h3>
+                <label>
+                    Mode
+                    <select id="render-mode">
+                        <option value="0" selected>Lit</option>
+                        <option value="1">Unlit</option>
+                        <option value="2">Normals</option>
+                        <option value="3">Depth</option>
+                        <option value="4">Metallic</option>
+                        <option value="5">Roughness</option>
+                        <option value="6">AO</option>
+                        <option value="7">UVs</option>
+                        <option value="8">Flat</option>
+                        <option value="9">Wireframe</option>
+                    </select>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>Bloom</h3>
                 <label>
                     <input type="checkbox" id="bloom-enabled" checked>
@@ -1082,6 +1101,11 @@
                     }
                 });
 
+                // Render mode control
+                document.getElementById('render-mode').addEventListener('change', (e) => {
+                    app.set_render_mode(parseInt(e.target.value));
+                });
+
                 // AA controls
                 const aaMode = document.getElementById('aa-mode');
                 function updateAAOptions() {
@@ -1705,6 +1729,8 @@
 
                 function saveSettings() {
                     const settings = {
+                        // Render mode
+                        renderMode: document.getElementById('render-mode').value,
                         // Bloom
                         bloomEnabled: document.getElementById('bloom-enabled').checked,
                         bloomIntensity: document.getElementById('bloom-intensity').value,
@@ -1818,6 +1844,7 @@
                         };
 
                         // Apply saved settings to UI
+                        setVal('render-mode', s.renderMode);
                         setVal('bloom-enabled', s.bloomEnabled);
                         setVal('bloom-intensity', s.bloomIntensity, 'bloom-intensity-val');
                         setVal('bloom-threshold', s.bloomThreshold, 'bloom-threshold-val');
@@ -1902,6 +1929,7 @@
 
                 function applySettingsToApp() {
                     // Apply all current UI values to the app
+                    app.set_render_mode(parseInt(document.getElementById('render-mode').value));
                     app.set_bloom_enabled(document.getElementById('bloom-enabled').checked);
                     app.set_bloom_intensity(parseFloat(document.getElementById('bloom-intensity').value));
                     app.set_bloom_threshold(parseFloat(document.getElementById('bloom-threshold').value));

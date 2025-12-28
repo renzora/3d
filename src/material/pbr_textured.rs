@@ -65,6 +65,8 @@ pub struct TexturedPbrMaterial {
     metallic_roughness_texture: Option<Texture2D>,
     /// Render pipeline.
     pipeline: Option<wgpu::RenderPipeline>,
+    /// Wireframe render pipeline (only available if POLYGON_MODE_LINE feature is supported).
+    wireframe_pipeline: Option<wgpu::RenderPipeline>,
     /// Camera bind group layout.
     camera_bind_group_layout: Option<wgpu::BindGroupLayout>,
     /// Model bind group layout.
@@ -100,6 +102,7 @@ impl TexturedPbrMaterial {
             normal_texture: None,
             metallic_roughness_texture: None,
             pipeline: None,
+            wireframe_pipeline: None,
             camera_bind_group_layout: None,
             model_bind_group_layout: None,
             material_bind_group_layout: None,
@@ -136,6 +139,12 @@ impl TexturedPbrMaterial {
     #[inline]
     pub fn pipeline(&self) -> Option<&wgpu::RenderPipeline> {
         self.pipeline.as_ref()
+    }
+
+    /// Get the wireframe render pipeline (if available).
+    #[inline]
+    pub fn wireframe_pipeline(&self) -> Option<&wgpu::RenderPipeline> {
+        self.wireframe_pipeline.as_ref()
     }
 
     /// Get camera bind group layout.
@@ -177,12 +186,14 @@ impl TexturedPbrMaterial {
     }
 
     /// Build the render pipeline.
+    /// If `wireframe_supported` is true, also builds a wireframe pipeline.
     pub fn build_pipeline(
         &mut self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        _queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
+        wireframe_supported: bool,
     ) {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Textured PBR Shader"),
@@ -457,6 +468,55 @@ impl TexturedPbrMaterial {
         });
 
         self.pipeline = Some(pipeline);
+
+        // Create wireframe pipeline if supported
+        if wireframe_supported {
+            let wireframe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Textured PBR Wireframe Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex::layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None, // No culling for wireframe to see both sides
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            });
+            self.wireframe_pipeline = Some(wireframe_pipeline);
+        }
+
         self.camera_bind_group_layout = Some(camera_bind_group_layout);
         self.model_bind_group_layout = Some(model_bind_group_layout);
         self.material_bind_group_layout = Some(material_bind_group_layout);

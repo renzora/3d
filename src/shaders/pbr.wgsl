@@ -40,6 +40,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) barycentric: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -47,6 +48,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) barycentric: vec3<f32>,
 }
 
 @vertex
@@ -57,6 +59,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * world_pos;
     out.world_normal = normalize(model.normal * in.normal);
     out.uv = in.uv;
+    out.barycentric = in.barycentric;
     return out;
 }
 

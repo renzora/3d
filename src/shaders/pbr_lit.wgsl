@@ -57,9 +57,10 @@ struct LightsUniform {
     // Hemisphere light: ground.rgb = ground color, ground.w = intensity
     hemisphere_ground: vec4<f32>,
     num_lights: u32,
+    // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs
+    render_mode: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
     lights: array<Light, 16>,
 }
 

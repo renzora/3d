@@ -233,6 +233,11 @@ pub struct RenApp {
     irradiance_view: wgpu::TextureView,
     // BRDF Look-Up Table for IBL
     brdf_lut: BrdfLut,
+    // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat
+    render_mode: u32,
+    // Wireframe rendering
+    wireframe_supported: bool,
+    wireframe_enabled: bool,
 }
 
 #[wasm_bindgen]
@@ -275,11 +280,21 @@ impl RenApp {
             .await
             .ok_or_else(|| JsValue::from_str("No suitable GPU adapter found"))?;
 
+        // Check if wireframe (polygon line mode) is supported
+        let adapter_features = adapter.features();
+        let wireframe_supported = adapter_features.contains(wgpu::Features::POLYGON_MODE_LINE);
+
+        let requested_features = if wireframe_supported {
+            wgpu::Features::POLYGON_MODE_LINE
+        } else {
+            wgpu::Features::empty()
+        };
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Ren Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: requested_features,
                     required_limits: wgpu::Limits::downlevel_webgl2_defaults()
                         .using_resolution(adapter.limits()),
                     memory_hints: Default::default(),
@@ -347,7 +362,7 @@ impl RenApp {
 
         // Create material and pipeline (target HDR format for full precision)
         let mut material = TexturedPbrMaterial::new();
-        material.build_pipeline(&device, &queue, hdr_format, depth_format);
+        material.build_pipeline(&device, &queue, hdr_format, depth_format, wireframe_supported);
 
         // Create line material and pipeline (also targets HDR format)
         let mut line_material = LineMaterial::new();
@@ -368,7 +383,7 @@ impl RenApp {
         let camera_uniform = PbrCameraUniform {
             view_proj: matrix4_to_array(camera.view_projection_matrix()),
             position: [camera_pos.x, camera_pos.y, camera_pos.z],
-            _padding: 0.0,
+            render_mode: 0,
             hemisphere_sky: [0.6, 0.75, 1.0, 0.0],  // Disabled by default
             hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
             ibl_settings: [0.3, 1.0, 0.0, 0.0],
@@ -964,6 +979,9 @@ impl RenApp {
             irradiance_texture,
             irradiance_view,
             brdf_lut,
+            render_mode: 0,
+            wireframe_supported,
+            wireframe_enabled: false,
         })
     }
 
@@ -1049,7 +1067,7 @@ impl RenApp {
             let camera_uniform = PbrCameraUniform {
                 view_proj,
                 position: [pos.x, pos.y, pos.z],
-                _padding: 0.0,
+                render_mode: self.render_mode,
                 hemisphere_sky: [
                     self.hemisphere_sky_color[0],
                     self.hemisphere_sky_color[1],
@@ -1145,11 +1163,16 @@ impl RenApp {
             label: Some("Render Encoder"),
         });
 
-        let clear_color = wgpu::Color {
-            r: self.clear_color.r as f64,
-            g: self.clear_color.g as f64,
-            b: self.clear_color.b as f64,
-            a: 1.0,
+        // Use simple backgrounds for debug modes
+        let clear_color = match self.render_mode {
+            8 => wgpu::Color { r: 0.05, g: 0.05, b: 0.06, a: 1.0 }, // Flat: very dark gray
+            9 => wgpu::Color::BLACK, // Wireframe: black
+            _ => wgpu::Color {
+                r: self.clear_color.r as f64,
+                g: self.clear_color.g as f64,
+                b: self.clear_color.b as f64,
+                a: 1.0,
+            }
         };
 
         // ========== Shadow Pass ==========
@@ -1456,12 +1479,19 @@ impl RenApp {
             });
 
             // Render skybox first (at far depth, behind everything)
-            if self.skybox_enabled {
+            // Skip skybox for flat mode (8) and wireframe mode (9)
+            if self.skybox_enabled && self.render_mode != 8 && self.render_mode != 9 {
                 self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
             }
 
-            // Render PBR meshes
-            if let Some(pipeline) = self.material.pipeline() {
+            // Render PBR meshes (use wireframe pipeline if enabled and available)
+            let pipeline_to_use = if self.wireframe_enabled {
+                self.material.wireframe_pipeline().or_else(|| self.material.pipeline())
+            } else {
+                self.material.pipeline()
+            };
+
+            if let Some(pipeline) = pipeline_to_use {
                 render_pass.set_pipeline(pipeline);
                 render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
@@ -1523,14 +1553,18 @@ impl RenApp {
 
         // Apply AO (SSAO or GTAO - only one should be enabled at a time)
         // GTAO is more physically accurate but more expensive
-        if self.gtao.enabled() {
-            self.gtao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
-        } else {
-            self.ssao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        // Only apply in Lit mode (render_mode == 0)
+        if self.render_mode == 0 {
+            if self.gtao.enabled() {
+                self.gtao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+            } else {
+                self.ssao.render_with_depth(&mut encoder, &self.depth_view, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+            }
         }
 
         // Apply Lumen GI if enabled (adds global illumination to scene)
-        if self.lumen.enabled() {
+        // Only apply in Lit mode (render_mode == 0)
+        if self.lumen.enabled() && self.render_mode == 0 {
             self.lumen.render_with_depth(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
             // Copy result back to scene_view for next passes
             encoder.copy_texture_to_texture(
@@ -1555,10 +1589,14 @@ impl RenApp {
         }
 
         // Apply bloom post-processing (reads from bloom_input, additively blends to scene_view)
-        self.bloom.render(&mut encoder, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        // Only apply in Lit mode (render_mode == 0)
+        if self.render_mode == 0 {
+            self.bloom.render(&mut encoder, &self.bloom_input_view, &self.scene_view, &self.device, &self.queue);
+        }
 
         // Apply SSR if enabled (scene + depth -> bloom_input)
-        let post_ssr_input = if self.ssr.enabled() {
+        // Only apply in Lit mode (render_mode == 0)
+        let post_ssr_input = if self.ssr.enabled() && self.render_mode == 0 {
             self.ssr.render_with_depth(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
             &self.bloom_input_view
         } else {
@@ -1774,7 +1812,7 @@ impl RenApp {
             let camera_uniform = PbrCameraUniform {
                 view_proj: matrix4_to_array(camera.view_projection_matrix()),
                 position: [pos.x, pos.y, pos.z],
-                _padding: 0.0,
+                render_mode: self.render_mode,
                 hemisphere_sky: [
                     self.hemisphere_sky_color[0],
                     self.hemisphere_sky_color[1],
@@ -1947,16 +1985,34 @@ impl RenApp {
         for (mesh_idx, loaded_mesh) in scene.meshes.iter().enumerate() {
             let geometry = &loaded_mesh.geometry;
 
-            // Build vertex data (position, normal, uv)
-            let mut vertex_data = Vec::with_capacity(geometry.positions.len() * 8);
-            for i in 0..geometry.positions.len() {
-                let pos = geometry.positions[i];
-                let normal = geometry.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
-                let uv = geometry.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+            // Build vertex data with barycentric coordinates for wireframe rendering
+            // We need to expand indexed geometry to give each triangle unique barycentric coords
+            // Vertex format: position(3) + normal(3) + uv(2) + barycentric(3) = 11 floats
+            let bary_coords = [
+                [1.0f32, 0.0, 0.0], // First vertex of triangle
+                [0.0f32, 1.0, 0.0], // Second vertex
+                [0.0f32, 0.0, 1.0], // Third vertex
+            ];
 
-                vertex_data.extend_from_slice(&pos);
-                vertex_data.extend_from_slice(&normal);
-                vertex_data.extend_from_slice(&uv);
+            let triangle_count = geometry.indices.len() / 3;
+            let mut vertex_data = Vec::with_capacity(triangle_count * 3 * 11);
+            let mut new_indices: Vec<u32> = Vec::with_capacity(triangle_count * 3);
+
+            for tri in 0..triangle_count {
+                for v in 0..3 {
+                    let idx = geometry.indices[tri * 3 + v] as usize;
+                    let pos = geometry.positions[idx];
+                    let normal = geometry.normals.get(idx).copied().unwrap_or([0.0, 1.0, 0.0]);
+                    let uv = geometry.uvs.get(idx).copied().unwrap_or([0.0, 0.0]);
+                    let bary = bary_coords[v];
+
+                    vertex_data.extend_from_slice(&pos);
+                    vertex_data.extend_from_slice(&normal);
+                    vertex_data.extend_from_slice(&uv);
+                    vertex_data.extend_from_slice(&bary);
+
+                    new_indices.push((tri * 3 + v) as u32);
+                }
             }
 
             let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1967,7 +2023,7 @@ impl RenApp {
 
             let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("Mesh {} Index Buffer", loaded_mesh.name)),
-                contents: bytemuck::cast_slice(&geometry.indices),
+                contents: bytemuck::cast_slice(&new_indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
 
@@ -2056,7 +2112,7 @@ impl RenApp {
                 &self.material,
                 vertex_buffer,
                 index_buffer,
-                geometry.indices.len() as u32,
+                new_indices.len() as u32,
                 &world_transform,
                 mat_uniform,
                 texture_bind_group,
@@ -2134,6 +2190,36 @@ impl RenApp {
             AaMode::Smaa => 2,
             AaMode::Taa => 3,
         }
+    }
+
+    /// Set render mode (0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat, 9=Wireframe).
+    #[wasm_bindgen]
+    pub fn set_render_mode(&mut self, mode: u32) {
+        self.render_mode = mode.min(9); // Clamp to valid range
+    }
+
+    /// Get current render mode.
+    #[wasm_bindgen]
+    pub fn get_render_mode(&self) -> u32 {
+        self.render_mode
+    }
+
+    /// Enable or disable wireframe rendering.
+    #[wasm_bindgen]
+    pub fn set_wireframe_enabled(&mut self, enabled: bool) {
+        self.wireframe_enabled = enabled;
+    }
+
+    /// Check if wireframe rendering is enabled.
+    #[wasm_bindgen]
+    pub fn is_wireframe_enabled(&self) -> bool {
+        self.wireframe_enabled
+    }
+
+    /// Check if wireframe rendering is supported on this device.
+    #[wasm_bindgen]
+    pub fn is_wireframe_supported(&self) -> bool {
+        self.wireframe_supported
     }
 
     /// Enable or disable FXAA anti-aliasing (legacy, use set_aa_mode instead).
@@ -3417,15 +3503,42 @@ impl RenApp {
         metallic: f32,
         roughness: f32,
     ) -> Result<(), JsValue> {
+        // Expand indexed geometry with barycentric coordinates for wireframe
+        // Input vertices: 8 floats per vertex (pos3 + normal3 + uv2)
+        // Output vertices: 11 floats per vertex (pos3 + normal3 + uv2 + bary3)
+        let bary_coords = [
+            [1.0f32, 0.0, 0.0],
+            [0.0f32, 1.0, 0.0],
+            [0.0f32, 0.0, 1.0],
+        ];
+
+        let triangle_count = indices.len() / 3;
+        let mut expanded_vertices: Vec<f32> = Vec::with_capacity(triangle_count * 3 * 11);
+        let mut new_indices: Vec<u32> = Vec::with_capacity(triangle_count * 3);
+
+        for tri in 0..triangle_count {
+            for v in 0..3 {
+                let idx = indices[tri * 3 + v] as usize;
+                let base = idx * 8; // 8 floats per input vertex
+
+                // Copy position (3), normal (3), uv (2)
+                expanded_vertices.extend_from_slice(&vertices[base..base + 8]);
+                // Add barycentric
+                expanded_vertices.extend_from_slice(&bary_coords[v]);
+
+                new_indices.push((tri * 3 + v) as u32);
+            }
+        }
+
         let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Shape Vertex Buffer"),
-            contents: bytemuck::cast_slice(vertices),
+            contents: bytemuck::cast_slice(&expanded_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Shape Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&new_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -3472,7 +3585,7 @@ impl RenApp {
             &self.material,
             vertex_buffer,
             index_buffer,
-            indices.len() as u32,
+            new_indices.len() as u32,
             &world_transform,
             mat_uniform,
             texture_bind_group,

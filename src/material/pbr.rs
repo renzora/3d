@@ -13,8 +13,8 @@ pub struct PbrCameraUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Camera world position.
     pub position: [f32; 3],
-    /// Padding for alignment.
-    pub _padding: f32,
+    /// Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs
+    pub render_mode: u32,
     /// Hemisphere light sky color (RGB) + enabled flag (W: 1.0 = enabled).
     pub hemisphere_sky: [f32; 4],
     /// Hemisphere light ground color (RGB) + intensity (W).
@@ -44,7 +44,7 @@ impl Default for PbrCameraUniform {
         Self {
             view_proj: [[0.0; 4]; 4],
             position: [0.0; 3],
-            _padding: 0.0,
+            render_mode: 0,
             hemisphere_sky: [0.6, 0.75, 1.0, 0.0],
             hemisphere_ground: [0.4, 0.3, 0.2, 1.0],
             ibl_settings: [0.3, 1.0, 0.0, 0.0],
