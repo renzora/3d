@@ -16,12 +16,16 @@ struct CameraUniform {
 struct ShadowUniform {
     // Light-space matrix for shadow mapping
     light_view_proj: mat4x4<f32>,
-    // Shadow settings: x=bias, y=normal_bias, z=enabled, w=pcf_mode
+    // Shadow settings: x=bias, y=normal_bias, z=enabled, w=light_type (0=dir, 1=spot, 2=point)
     shadow_params: vec4<f32>,
-    // Light direction (for directional light)
-    light_direction: vec4<f32>,
+    // Light direction (xyz) for directional, or light position (xyz) for spot/point
+    light_dir_or_pos: vec4<f32>,
     // Shadow map size (x=width, y=height, z=1/width, w=1/height)
     shadow_map_size: vec4<f32>,
+    // Spot light direction (xyz) and range (w)
+    spot_direction: vec4<f32>,
+    // Spot light params: x=outer_cos, y=inner_cos, z=intensity, w=unused
+    spot_params: vec4<f32>,
 }
 
 struct ModelUniform {
@@ -69,6 +73,10 @@ var<uniform> shadow: ShadowUniform;
 var shadow_map: texture_depth_2d;
 @group(3) @binding(8)
 var shadow_sampler: sampler_comparison;
+@group(3) @binding(9)
+var shadow_cube_map: texture_depth_cube;
+@group(3) @binding(10)
+var shadow_cube_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -163,8 +171,8 @@ fn calculate_hemisphere_light(normal: vec3<f32>) -> vec3<f32> {
     return hemisphere_color * intensity;
 }
 
-// Calculate shadow factor for a world position
-fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+// Calculate shadow factor for directional/spot lights (2D shadow map)
+fn calculate_shadow_2d(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
     // Transform to light space
     let light_space_pos = shadow.light_view_proj * vec4<f32>(world_pos, 1.0);
 
@@ -179,9 +187,8 @@ fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     let bias = shadow.shadow_params.x;
     let normal_bias = shadow.shadow_params.y;
 
-    // Apply normal bias
-    let light_dir = normalize(shadow.light_direction.xyz);
-    let cos_angle = max(dot(normal, -light_dir), 0.0);
+    // Apply normal bias based on angle to light
+    let cos_angle = max(dot(normal, to_light), 0.0);
     let slope_bias = bias + normal_bias * (1.0 - cos_angle);
     let compare_depth = proj_z - slope_bias;
 
@@ -206,14 +213,57 @@ fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 
     // Check bounds and shadows enabled - multiply result instead of early return
     let in_bounds = step(0.0, proj_x) * step(proj_x, 1.0) * step(0.0, proj_y) * step(proj_y, 1.0) * step(0.0, proj_z) * step(proj_z, 1.0);
-    let shadows_on = step(0.5, shadow.shadow_params.z);
 
-    // If out of bounds or shadows disabled, return 1.0 (no shadow)
-    return mix(1.0, shadow_factor, in_bounds * shadows_on);
+    return mix(1.0, shadow_factor, in_bounds);
 }
 
-// Calculate directional light with shadows
-fn calculate_directional_light(
+// Calculate shadow factor for point lights (cube shadow map)
+fn calculate_shadow_cube(world_pos: vec3<f32>, normal: vec3<f32>, light_pos: vec3<f32>) -> f32 {
+    // Direction from light to fragment
+    let light_to_frag = world_pos - light_pos;
+    let dist = length(light_to_frag);
+    let dir = normalize(light_to_frag);
+
+    // Get range from spot_direction.w
+    let range = shadow.spot_direction.w;
+
+    // Normalize distance to [0, 1] range for comparison
+    let normalized_depth = dist / range;
+
+    let bias = shadow.shadow_params.x * 2.0; // Cube maps need more bias
+    let compare_depth = normalized_depth - bias;
+
+    // Sample cube shadow map - use the direction to sample
+    // The cube map stores normalized depth values
+    let shadow_factor = textureSampleCompare(shadow_cube_map, shadow_cube_sampler, dir, compare_depth);
+
+    // Check if within range
+    let in_range = step(normalized_depth, 1.0);
+
+    return mix(1.0, shadow_factor, in_range);
+}
+
+// Calculate shadow factor based on light type
+fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, light_type: f32) -> f32 {
+    let shadows_on = step(0.5, shadow.shadow_params.z);
+
+    if (shadows_on < 0.5) {
+        return 1.0;
+    }
+
+    // Use cube shadow for point lights, 2D shadow for directional/spot
+    if (light_type > 1.5) {
+        // Point light - use cube shadow map
+        let light_pos = shadow.light_dir_or_pos.xyz;
+        return calculate_shadow_cube(world_pos, normal, light_pos);
+    } else {
+        // Directional or spot - use 2D shadow map
+        return calculate_shadow_2d(world_pos, normal, to_light);
+    }
+}
+
+// Calculate shadow-casting light contribution (directional or spot)
+fn calculate_shadow_light(
     world_pos: vec3<f32>,
     n: vec3<f32>,
     v: vec3<f32>,
@@ -222,18 +272,58 @@ fn calculate_directional_light(
     metallic: f32,
     roughness: f32,
 ) -> vec3<f32> {
-    // Check if shadows are enabled (which means directional light is active)
-    if (shadow.shadow_params.z < 0.5) {
+    // Check if shadow light is enabled
+    let shadows_enabled = shadow.shadow_params.z;
+    if (shadows_enabled < 0.5) {
         return vec3<f32>(0.0);
     }
 
-    let light_dir = normalize(-shadow.light_direction.xyz);
+    let light_type = shadow.shadow_params.w; // 0=directional, 1=spot, 2=point
+
+    var light_dir: vec3<f32>;
+    var attenuation: f32 = 1.0;
+    var spot_effect: f32 = 1.0;
+
+    if (light_type < 0.5) {
+        // Directional light: direction is constant
+        light_dir = normalize(-shadow.light_dir_or_pos.xyz);
+    } else if (light_type < 1.5) {
+        // Spot light: direction from light position to fragment
+        let light_pos = shadow.light_dir_or_pos.xyz;
+        let to_frag = world_pos - light_pos;
+        let dist = length(to_frag);
+        light_dir = normalize(-to_frag);
+
+        // Distance attenuation
+        let range = shadow.spot_direction.w;
+        attenuation = clamp(1.0 - dist / range, 0.0, 1.0);
+        attenuation *= attenuation; // Quadratic falloff
+
+        // Spot cone falloff
+        let spot_dir = normalize(shadow.spot_direction.xyz);
+        let outer_cos = shadow.spot_params.x;
+        let inner_cos = shadow.spot_params.y;
+        let cos_angle = dot(-light_dir, spot_dir);
+        spot_effect = clamp((cos_angle - outer_cos) / (inner_cos - outer_cos), 0.0, 1.0);
+    } else {
+        // Point light: direction from light position to fragment (no shadow support yet)
+        let light_pos = shadow.light_dir_or_pos.xyz;
+        let to_frag = world_pos - light_pos;
+        let dist = length(to_frag);
+        light_dir = normalize(-to_frag);
+
+        // Distance attenuation
+        let range = shadow.spot_direction.w;
+        attenuation = clamp(1.0 - dist / range, 0.0, 1.0);
+        attenuation *= attenuation;
+    }
+
     let h = normalize(v + light_dir);
 
-    // Directional light has no attenuation
+    // Light color and intensity
     let light_color = vec3<f32>(1.0, 0.98, 0.95);
     let light_intensity = 3.0;
-    let radiance = light_color * light_intensity;
+    let radiance = light_color * light_intensity * attenuation * spot_effect;
 
     // Cook-Torrance BRDF
     let ndf = distribution_ggx(n, h, roughness);
@@ -251,7 +341,7 @@ fn calculate_directional_light(
     let n_dot_l = max(dot(n, light_dir), 0.0);
 
     // Get shadow factor
-    let shadow_factor = calculate_shadow(world_pos, n);
+    let shadow_factor = calculate_shadow(world_pos, n, light_dir, light_type);
 
     return (kd * albedo / PI + specular) * radiance * n_dot_l * shadow_factor;
 }
@@ -293,8 +383,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var lo = vec3<f32>(0.0);
 
-    // Directional light with shadows (sun)
-    lo += calculate_directional_light(in.world_position, n, v, f0, albedo, metallic, roughness);
+    // Shadow-casting light (directional, spot, or point)
+    lo += calculate_shadow_light(in.world_position, n, v, f0, albedo, metallic, roughness);
 
     // Light 1 - Key light (stronger for HDR output)
     let light1_pos = vec3<f32>(2.0, 4.0, 2.0);

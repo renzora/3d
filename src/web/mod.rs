@@ -21,27 +21,46 @@ use crate::shadows::{PCFMode, ShadowConfig};
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
+/// Shadow light type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum ShadowLightType {
+    /// Directional light (sun).
+    #[default]
+    Directional = 0,
+    /// Spot light.
+    Spot = 1,
+    /// Point light.
+    Point = 2,
+}
+
 /// Shadow uniform data for the shader.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct WebShadowUniform {
     /// Light-space view-projection matrix.
     pub light_view_proj: [[f32; 4]; 4],
-    /// Shadow params: x=bias, y=normal_bias, z=enabled, w=pcf_mode
+    /// Shadow params: x=bias, y=normal_bias, z=enabled, w=light_type (0=dir, 1=spot, 2=point)
     pub shadow_params: [f32; 4],
-    /// Light direction (xyz) + padding
-    pub light_direction: [f32; 4],
+    /// Light direction (xyz) for directional, or position (xyz) for spot/point
+    pub light_dir_or_pos: [f32; 4],
     /// Shadow map size: x=width, y=height, z=1/width, w=1/height
     pub shadow_map_size: [f32; 4],
+    /// Spot direction (xyz) and range (w)
+    pub spot_direction: [f32; 4],
+    /// Spot params: x=outer_cos, y=inner_cos, z=intensity, w=unused
+    pub spot_params: [f32; 4],
 }
 
 impl Default for WebShadowUniform {
     fn default() -> Self {
         Self {
             light_view_proj: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
-            shadow_params: [0.005, 0.02, 0.0, 2.0], // bias, normal_bias, disabled, PCF 3x3
-            light_direction: [-0.5, -1.0, -0.3, 0.0],
+            shadow_params: [0.005, 0.02, 0.0, 0.0], // bias, normal_bias, disabled, directional
+            light_dir_or_pos: [-0.5, -1.0, -0.3, 0.0],
             shadow_map_size: [1024.0, 1024.0, 1.0 / 1024.0, 1.0 / 1024.0],
+            spot_direction: [0.0, -1.0, 0.0, 10.0], // direction (0,-1,0), range 10
+            spot_params: [0.9063, 0.9659, 1.0, 0.0], // cos(25°), cos(15°), intensity 1
         }
     }
 }
@@ -166,6 +185,18 @@ pub struct RenApp {
     shadow_depth_pipeline: wgpu::RenderPipeline,
     shadow_model_bind_group_layout: wgpu::BindGroupLayout,
     light_direction: [f32; 3],
+    // Shadow light type and spot light settings
+    shadow_light_type: ShadowLightType,
+    spot_position: [f32; 3],
+    spot_direction: [f32; 3],
+    spot_range: f32,
+    spot_inner_angle: f32,
+    spot_outer_angle: f32,
+    // Cube shadow map for point lights
+    shadow_cube_map_texture: wgpu::Texture,
+    shadow_cube_map_view: wgpu::TextureView,
+    shadow_cube_face_views: [wgpu::TextureView; 6],
+    shadow_cube_sampler: wgpu::Sampler,
 }
 
 #[wasm_bindgen]
@@ -507,6 +538,61 @@ impl RenApp {
             ..Default::default()
         });
 
+        // Create cube shadow map for point lights (6 faces)
+        let shadow_cube_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Cube Map Texture"),
+            size: wgpu::Extent3d {
+                width: shadow_resolution,
+                height: shadow_resolution,
+                depth_or_array_layers: 6, // 6 faces for cube map
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        // Create cube view for sampling
+        let shadow_cube_map_view = shadow_cube_map_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Shadow Cube Map View"),
+            format: Some(wgpu::TextureFormat::Depth32Float),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            aspect: wgpu::TextureAspect::DepthOnly,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+        });
+
+        // Create individual face views for rendering
+        let shadow_cube_face_views: [wgpu::TextureView; 6] = std::array::from_fn(|i| {
+            shadow_cube_map_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("Shadow Cube Face {} View", i)),
+                format: Some(wgpu::TextureFormat::Depth32Float),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                aspect: wgpu::TextureAspect::DepthOnly,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: i as u32,
+                array_layer_count: Some(1),
+            })
+        });
+
+        // Cube shadow sampler (same comparison settings)
+        let shadow_cube_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Cube Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
         // Create shadow uniform buffer
         let shadow_uniform = WebShadowUniform::default();
         let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -700,6 +786,16 @@ impl RenApp {
             shadow_depth_pipeline,
             shadow_model_bind_group_layout,
             light_direction: [-0.5, -1.0, -0.3],
+            shadow_light_type: ShadowLightType::Directional,
+            spot_position: [0.0, 5.0, 0.0],
+            spot_direction: [0.0, -1.0, 0.0],
+            spot_range: 15.0,
+            spot_inner_angle: 15.0_f32.to_radians(),
+            spot_outer_angle: 25.0_f32.to_radians(),
+            shadow_cube_map_texture,
+            shadow_cube_map_view,
+            shadow_cube_face_views,
+            shadow_cube_sampler,
         })
     }
 
@@ -854,47 +950,92 @@ impl RenApp {
 
         // ========== Shadow Pass ==========
         if self.shadows_enabled {
-            // Calculate light-space matrix for directional light
-            let light_dir = Vector3::new(self.light_direction[0], self.light_direction[1], self.light_direction[2]).normalized();
-
-            // Create orthographic projection centered on scene
-            let light_pos = Vector3::new(-light_dir.x * 15.0, -light_dir.y * 15.0, -light_dir.z * 15.0);
-            let light_target = Vector3::ZERO;
-            let light_up = if light_dir.y.abs() > 0.99 { Vector3::new(0.0, 0.0, 1.0) } else { Vector3::new(0.0, 1.0, 0.0) };
-
-            let light_view = Matrix4::look_at(&light_pos, &light_target, &light_up);
-            let ortho_size = 20.0;
-            let light_proj = Matrix4::orthographic(-ortho_size, ortho_size, -ortho_size, ortho_size, 0.1, 50.0);
-            let light_view_proj = light_proj.multiply(&light_view);
-
-            // Update shadow uniform
             let resolution = self.shadow_config.resolution as f32;
-            let shadow_uniform = WebShadowUniform {
-                light_view_proj: matrix4_to_array(&light_view_proj),
-                shadow_params: [
-                    self.shadow_config.bias,
-                    self.shadow_config.normal_bias,
-                    1.0, // enabled
-                    match self.shadow_config.pcf_mode {
-                        PCFMode::None => 0.0,
-                        PCFMode::Hardware2x2 => 1.0,
-                        PCFMode::Soft3x3 => 2.0,
-                        PCFMode::Soft5x5 => 3.0,
-                        PCFMode::PoissonDisk => 4.0,
-                    },
-                ],
-                light_direction: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-                shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
+
+            // Calculate light-space matrix based on light type
+            let (light_view_proj, shadow_uniform) = match self.shadow_light_type {
+                ShadowLightType::Directional => {
+                    // Directional light: orthographic projection
+                    let light_dir = Vector3::new(self.light_direction[0], self.light_direction[1], self.light_direction[2]).normalized();
+                    let light_pos = Vector3::new(-light_dir.x * 15.0, -light_dir.y * 15.0, -light_dir.z * 15.0);
+                    let light_target = Vector3::ZERO;
+                    let light_up = if light_dir.y.abs() > 0.99 { Vector3::new(0.0, 0.0, 1.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+
+                    let light_view = Matrix4::look_at(&light_pos, &light_target, &light_up);
+                    let ortho_size = 20.0;
+                    let light_proj = Matrix4::orthographic(-ortho_size, ortho_size, -ortho_size, ortho_size, 0.1, 50.0);
+                    let view_proj = light_proj.multiply(&light_view);
+
+                    let uniform = WebShadowUniform {
+                        light_view_proj: matrix4_to_array(&view_proj),
+                        shadow_params: [
+                            self.shadow_config.bias,
+                            self.shadow_config.normal_bias,
+                            1.0, // enabled
+                            ShadowLightType::Directional as u32 as f32,
+                        ],
+                        light_dir_or_pos: [light_dir.x, light_dir.y, light_dir.z, 0.0],
+                        shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
+                        spot_direction: [0.0, -1.0, 0.0, 10.0],
+                        spot_params: [0.9063, 0.9659, 1.0, 0.0],
+                    };
+                    (view_proj, uniform)
+                },
+                ShadowLightType::Spot => {
+                    // Spot light: perspective projection
+                    let light_pos = Vector3::new(self.spot_position[0], self.spot_position[1], self.spot_position[2]);
+                    let spot_dir = Vector3::new(self.spot_direction[0], self.spot_direction[1], self.spot_direction[2]).normalized();
+                    let light_target = light_pos + spot_dir;
+                    let light_up = if spot_dir.y.abs() > 0.99 { Vector3::new(0.0, 0.0, 1.0) } else { Vector3::new(0.0, 1.0, 0.0) };
+
+                    let light_view = Matrix4::look_at(&light_pos, &light_target, &light_up);
+                    // Use outer angle * 2 for the perspective FOV
+                    let fov = self.spot_outer_angle * 2.0;
+                    let light_proj = Matrix4::perspective(fov, 1.0, 0.1, self.spot_range);
+                    let view_proj = light_proj.multiply(&light_view);
+
+                    let uniform = WebShadowUniform {
+                        light_view_proj: matrix4_to_array(&view_proj),
+                        shadow_params: [
+                            self.shadow_config.bias,
+                            self.shadow_config.normal_bias,
+                            1.0, // enabled
+                            ShadowLightType::Spot as u32 as f32,
+                        ],
+                        light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
+                        shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
+                        spot_direction: [spot_dir.x, spot_dir.y, spot_dir.z, self.spot_range],
+                        spot_params: [self.spot_outer_angle.cos(), self.spot_inner_angle.cos(), 1.0, 0.0],
+                    };
+                    (view_proj, uniform)
+                },
+                ShadowLightType::Point => {
+                    // Point light: cube shadow map (6 faces)
+                    let light_pos = Vector3::new(self.spot_position[0], self.spot_position[1], self.spot_position[2]);
+
+                    // Use identity matrix as placeholder - actual rendering is done per-face below
+                    let view_proj = Matrix4::identity();
+
+                    let uniform = WebShadowUniform {
+                        light_view_proj: matrix4_to_array(&view_proj), // Not used for cube sampling
+                        shadow_params: [
+                            self.shadow_config.bias,
+                            self.shadow_config.normal_bias,
+                            1.0, // enabled
+                            ShadowLightType::Point as u32 as f32,
+                        ],
+                        light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
+                        shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
+                        spot_direction: [0.0, -1.0, 0.0, self.spot_range], // w = range for cube sampling
+                        spot_params: [0.0, 0.0, 1.0, 0.0],
+                    };
+                    (view_proj, uniform)
+                },
             };
+
             self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
 
-            // Create light bind group for shadow pass
-            let light_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Shadow Light Buffer"),
-                contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
+            // Create bind group layout for shadow pass (reused for all passes)
             let shadow_light_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Shadow Light BG Layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -909,51 +1050,137 @@ impl RenApp {
                 }],
             });
 
-            let light_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Shadow Light Bind Group"),
-                layout: &shadow_light_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: light_buffer.as_entire_binding(),
-                }],
-            });
+            // For point lights, render 6 cube faces
+            if matches!(self.shadow_light_type, ShadowLightType::Point) {
+                let light_pos = Vector3::new(self.spot_position[0], self.spot_position[1], self.spot_position[2]);
+                let light_proj = Matrix4::perspective(std::f32::consts::FRAC_PI_2, 1.0, 0.1, self.spot_range);
 
-            // Shadow render pass
-            {
-                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow Render Pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.shadow_map_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+                // Cube face directions: +X, -X, +Y, -Y, +Z, -Z
+                let face_directions: [(Vector3, Vector3); 6] = [
+                    (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, -1.0, 0.0)),  // +X
+                    (Vector3::new(-1.0, 0.0, 0.0), Vector3::new(0.0, -1.0, 0.0)), // -X
+                    (Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)),   // +Y
+                    (Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, -1.0)), // -Y
+                    (Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, -1.0, 0.0)),  // +Z
+                    (Vector3::new(0.0, 0.0, -1.0), Vector3::new(0.0, -1.0, 0.0)), // -Z
+                ];
 
-                shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
-                shadow_pass.set_bind_group(0, &light_bind_group, &[]);
+                for (face_idx, (dir, up)) in face_directions.iter().enumerate() {
+                    let light_target = Vector3::new(
+                        light_pos.x + dir.x,
+                        light_pos.y + dir.y,
+                        light_pos.z + dir.z,
+                    );
+                    let light_view = Matrix4::look_at(&light_pos, &light_target, up);
+                    let face_view_proj = light_proj.multiply(&light_view);
 
-                // Render all meshes to shadow map
-                for mesh in &self.meshes {
-                    // Create model bind group for shadow pass
-                    let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Shadow Model Bind Group"),
-                        layout: &self.shadow_model_bind_group_layout,
+                    // Create light buffer for this face
+                    let light_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Shadow Cube Face {} Light Buffer", face_idx)),
+                        contents: bytemuck::cast_slice(&matrix4_to_array(&face_view_proj)),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+
+                    let light_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("Shadow Cube Face {} Light Bind Group", face_idx)),
+                        layout: &shadow_light_bind_group_layout,
                         entries: &[wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: mesh.model_buffer.as_entire_binding(),
+                            resource: light_buffer.as_entire_binding(),
                         }],
                     });
 
-                    shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
-                    shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    // Render to this cube face
+                    {
+                        let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(&format!("Shadow Cube Face {} Pass", face_idx)),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: &self.shadow_cube_face_views[face_idx],
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            }),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
+                        shadow_pass.set_bind_group(0, &light_bind_group, &[]);
+
+                        // Render all meshes to this cube face
+                        for mesh in &self.meshes {
+                            let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("Shadow Cube Model Bind Group"),
+                                layout: &self.shadow_model_bind_group_layout,
+                                entries: &[wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: mesh.model_buffer.as_entire_binding(),
+                                }],
+                            });
+
+                            shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
+                            shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                            shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        }
+                    }
+                }
+            } else {
+                // Directional or Spot light: single 2D shadow map
+                let light_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Shadow Light Buffer"),
+                    contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+                let light_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Shadow Light Bind Group"),
+                    layout: &shadow_light_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: light_buffer.as_entire_binding(),
+                    }],
+                });
+
+                // Shadow render pass for 2D shadow map
+                {
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow Render Pass"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.shadow_map_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
+                    shadow_pass.set_bind_group(0, &light_bind_group, &[]);
+
+                    // Render all meshes to shadow map
+                    for mesh in &self.meshes {
+                        let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Shadow Model Bind Group"),
+                            layout: &self.shadow_model_bind_group_layout,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: mesh.model_buffer.as_entire_binding(),
+                            }],
+                        });
+
+                        shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
+                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
                 }
             }
         } else {
@@ -1510,6 +1737,8 @@ impl RenApp {
                     &self.shadow_uniform_buffer,
                     &self.shadow_map_view,
                     &self.shadow_sampler,
+                    &self.shadow_cube_map_view,
+                    &self.shadow_cube_sampler,
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -2129,6 +2358,42 @@ impl RenApp {
         self.light_direction = [x, y, z];
     }
 
+    /// Set shadow light type (0=directional, 1=spot, 2=point).
+    #[wasm_bindgen]
+    pub fn set_shadow_light_type(&mut self, light_type: u32) {
+        self.shadow_light_type = match light_type {
+            0 => ShadowLightType::Directional,
+            1 => ShadowLightType::Spot,
+            2 => ShadowLightType::Point,
+            _ => ShadowLightType::Directional,
+        };
+    }
+
+    /// Set spot light position.
+    #[wasm_bindgen]
+    pub fn set_spot_position(&mut self, x: f32, y: f32, z: f32) {
+        self.spot_position = [x, y, z];
+    }
+
+    /// Set spot light direction.
+    #[wasm_bindgen]
+    pub fn set_spot_direction(&mut self, x: f32, y: f32, z: f32) {
+        self.spot_direction = [x, y, z];
+    }
+
+    /// Set spot light range.
+    #[wasm_bindgen]
+    pub fn set_spot_range(&mut self, range: f32) {
+        self.spot_range = range;
+    }
+
+    /// Set spot light angles in degrees.
+    #[wasm_bindgen]
+    pub fn set_spot_angles(&mut self, inner_deg: f32, outer_deg: f32) {
+        self.spot_inner_angle = inner_deg.to_radians();
+        self.spot_outer_angle = outer_deg.to_radians();
+    }
+
     /// Add demo shapes to showcase bloom effect.
     #[wasm_bindgen]
     pub fn add_demo_shapes(&mut self) -> Result<(), JsValue> {
@@ -2322,6 +2587,8 @@ impl RenApp {
                 &self.shadow_uniform_buffer,
                 &self.shadow_map_view,
                 &self.shadow_sampler,
+                &self.shadow_cube_map_view,
+                &self.shadow_cube_sampler,
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 

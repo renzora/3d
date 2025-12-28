@@ -323,6 +323,24 @@ impl TexturedPbrMaterial {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
+                    // Cube shadow map texture (binding 9)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Cube shadow comparison sampler (binding 10)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
                 ],
             });
 
@@ -402,6 +420,8 @@ impl TexturedPbrMaterial {
         shadow_uniform_buffer: &wgpu::Buffer,
         shadow_map_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
+        shadow_cube_map_view: &wgpu::TextureView,
+        shadow_cube_sampler: &wgpu::Sampler,
     ) -> Option<wgpu::BindGroup> {
         self.texture_bind_group_layout.as_ref().map(|layout| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -433,7 +453,7 @@ impl TexturedPbrMaterial {
                         binding: 5,
                         resource: wgpu::BindingResource::Sampler(metallic_roughness_sampler.wgpu_sampler()),
                     },
-                    // Shadow (bindings 6-8)
+                    // Shadow 2D (bindings 6-8)
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: shadow_uniform_buffer.as_entire_binding(),
@@ -445,6 +465,15 @@ impl TexturedPbrMaterial {
                     wgpu::BindGroupEntry {
                         binding: 8,
                         resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    },
+                    // Shadow cube (bindings 9-10)
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(shadow_cube_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::Sampler(shadow_cube_sampler),
                     },
                 ],
             })

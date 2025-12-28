@@ -375,6 +375,46 @@
                         <option value="4" selected>4</option>
                     </select>
                 </label>
+                <label>
+                    Light Type
+                    <select id="shadow-light-type">
+                        <option value="0" selected>Directional</option>
+                        <option value="1">Spot</option>
+                        <option value="2">Point</option>
+                    </select>
+                </label>
+                <div id="spot-controls" style="display: none;">
+                    <label>
+                        Spot Position X
+                        <input type="range" id="spot-pos-x" min="-10" max="10" step="0.5" value="0">
+                        <span class="value" id="spot-pos-x-val">0</span>
+                    </label>
+                    <label>
+                        Spot Position Y
+                        <input type="range" id="spot-pos-y" min="0" max="15" step="0.5" value="5">
+                        <span class="value" id="spot-pos-y-val">5</span>
+                    </label>
+                    <label>
+                        Spot Position Z
+                        <input type="range" id="spot-pos-z" min="-10" max="10" step="0.5" value="0">
+                        <span class="value" id="spot-pos-z-val">0</span>
+                    </label>
+                    <label>
+                        Spot Range
+                        <input type="range" id="spot-range" min="5" max="50" step="1" value="15">
+                        <span class="value" id="spot-range-val">15</span>
+                    </label>
+                    <label>
+                        Spot Inner Angle
+                        <input type="range" id="spot-inner-angle" min="5" max="45" step="1" value="15">
+                        <span class="value" id="spot-inner-angle-val">15°</span>
+                    </label>
+                    <label>
+                        Spot Outer Angle
+                        <input type="range" id="spot-outer-angle" min="10" max="60" step="1" value="25">
+                        <span class="value" id="spot-outer-angle-val">25°</span>
+                    </label>
+                </div>
             </div>
         </div>
 
@@ -883,6 +923,66 @@
                 });
                 document.getElementById('shadow-cascades').addEventListener('change', (e) => {
                     if (app.set_shadow_cascades) app.set_shadow_cascades(parseInt(e.target.value));
+                });
+
+                // Shadow light type
+                document.getElementById('shadow-light-type').addEventListener('change', (e) => {
+                    const val = parseInt(e.target.value);
+                    if (app.set_shadow_light_type) app.set_shadow_light_type(val);
+                    // Show/hide spot controls
+                    document.getElementById('spot-controls').style.display = (val === 1 || val === 2) ? 'block' : 'none';
+                });
+
+                // Spot light controls
+                document.getElementById('spot-pos-x').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    document.getElementById('spot-pos-x-val').textContent = val.toFixed(1);
+                    if (app.set_spot_position) {
+                        app.set_spot_position(
+                            val,
+                            parseFloat(document.getElementById('spot-pos-y').value),
+                            parseFloat(document.getElementById('spot-pos-z').value)
+                        );
+                    }
+                });
+                document.getElementById('spot-pos-y').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    document.getElementById('spot-pos-y-val').textContent = val.toFixed(1);
+                    if (app.set_spot_position) {
+                        app.set_spot_position(
+                            parseFloat(document.getElementById('spot-pos-x').value),
+                            val,
+                            parseFloat(document.getElementById('spot-pos-z').value)
+                        );
+                    }
+                });
+                document.getElementById('spot-pos-z').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    document.getElementById('spot-pos-z-val').textContent = val.toFixed(1);
+                    if (app.set_spot_position) {
+                        app.set_spot_position(
+                            parseFloat(document.getElementById('spot-pos-x').value),
+                            parseFloat(document.getElementById('spot-pos-y').value),
+                            val
+                        );
+                    }
+                });
+                document.getElementById('spot-range').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    document.getElementById('spot-range-val').textContent = val.toFixed(0);
+                    if (app.set_spot_range) app.set_spot_range(val);
+                });
+                document.getElementById('spot-inner-angle').addEventListener('input', (e) => {
+                    const inner = parseFloat(e.target.value);
+                    document.getElementById('spot-inner-angle-val').textContent = inner + '°';
+                    const outer = parseFloat(document.getElementById('spot-outer-angle').value);
+                    if (app.set_spot_angles) app.set_spot_angles(inner, Math.max(inner + 5, outer));
+                });
+                document.getElementById('spot-outer-angle').addEventListener('input', (e) => {
+                    const outer = parseFloat(e.target.value);
+                    document.getElementById('spot-outer-angle-val').textContent = outer + '°';
+                    const inner = parseFloat(document.getElementById('spot-inner-angle').value);
+                    if (app.set_spot_angles) app.set_spot_angles(Math.min(inner, outer - 5), outer);
                 });
 
                 // DoF controls

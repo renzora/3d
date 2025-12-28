@@ -221,15 +221,17 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `hemisphere_light.rs` | Sky/ground gradient | ✅ |
 | `rect_area_light.rs` | Area light (LTC) | |
 
-### 5.2 Shadows (`src/shadows/`)
-| File | Description |
-|------|-------------|
-| `shadow.rs` | Base shadow trait |
-| `shadow_map.rs` | Shadow map texture management |
-| `directional_shadow.rs` | CSM for directional lights |
-| `spot_shadow.rs` | Perspective shadow map |
-| `point_shadow.rs` | Omnidirectional shadow (cubemap) |
-| `pcf_shadow.rs` | PCF shadow filtering |
+### 5.2 Shadows (`src/shadows/`) ✅
+| File | Description | Status |
+|------|-------------|--------|
+| `mod.rs` | Shadow config, PCF modes | ✅ |
+| `shadow_config.rs` | Shadow quality settings | ✅ |
+| `shadow_map.rs` | Shadow map texture management | ✅ |
+| `directional_shadow.rs` | Directional light shadows | ✅ |
+| `pcf_shadow.rs` | PCF shadow filtering (3x3) | ✅ |
+| `spot_shadow.rs` | Perspective shadow map | ✅ |
+| `point_shadow.rs` | Omnidirectional shadow (cubemap) | Partial |
+| `cascade.rs` | Cascaded shadow maps | ✅ (infrastructure) |
 
 ---
 
