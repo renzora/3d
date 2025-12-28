@@ -13,11 +13,11 @@ pub enum TonemappingMode {
     /// Reinhard with white point.
     ReinhardLuminance,
     /// ACES filmic curve.
-    #[default]
     Aces,
     /// Uncharted 2 filmic curve.
     Uncharted2,
-    /// AgX (Blender 4.0+ default).
+    /// AgX (Blender 4.0+ default) - best for both HDR and SDR.
+    #[default]
     AgX,
 }
 
@@ -52,7 +52,7 @@ pub struct TonemappingSettings {
 impl Default for TonemappingSettings {
     fn default() -> Self {
         Self {
-            mode: TonemappingMode::Aces,
+            mode: TonemappingMode::AgX,
             exposure: 1.0,
             gamma: 2.2,
             contrast: 1.0,

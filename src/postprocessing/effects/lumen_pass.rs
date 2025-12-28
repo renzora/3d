@@ -1409,9 +1409,17 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec
         let screen = project_to_screen(ray_pos);
         let uv = screen.xy;
 
-        // Check bounds
+        // Check bounds - when ray goes off-screen, use IBL fallback
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-            break;
+            // Simple hemisphere-based IBL fallback for off-screen rays
+            // Use the ray direction to interpolate between sky and ground colors
+            let up_factor = direction.y * 0.5 + 0.5; // 0 = down, 1 = up
+            let sky_color = vec3<f32>(0.6, 0.75, 0.9);   // Light blue sky
+            let ground_color = vec3<f32>(0.2, 0.15, 0.1); // Warm brown ground
+            let fallback_color = mix(ground_color, sky_color, up_factor);
+            // Reduced intensity for IBL fallback (subtle ambient)
+            let fallback_intensity = 0.15;
+            return vec4<f32>(fallback_color * fallback_intensity, 1.0);
         }
 
         // Sample depth
@@ -1447,7 +1455,13 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32) -> vec
         }
     }
 
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    // No hit found after all steps - use IBL fallback based on ray direction
+    let up_factor = direction.y * 0.5 + 0.5;
+    let sky_color = vec3<f32>(0.6, 0.75, 0.9);
+    let ground_color = vec3<f32>(0.2, 0.15, 0.1);
+    let fallback_color = mix(ground_color, sky_color, up_factor);
+    let fallback_intensity = 0.1; // Even more subtle for max-distance fallback
+    return vec4<f32>(fallback_color * fallback_intensity, 1.0);
 }
 
 @fragment
@@ -1663,6 +1677,35 @@ fn linearize_depth(d: f32) -> f32 {
     return near * far / (far - d * (far - near));
 }
 
+// Reconstruct view-space position from depth
+fn get_view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
+    var view_pos = params.inv_projection * ndc;
+    view_pos /= view_pos.w;
+    return view_pos.xyz;
+}
+
+// Reconstruct normal from depth using screen-space derivatives
+fn get_normal_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let texel = params.resolution.xy;
+
+    // Sample neighboring depths
+    let depth_r = textureSampleLevel(depth_texture, point_sampler, uv + vec2(texel.x, 0.0), 0);
+    let depth_u = textureSampleLevel(depth_texture, point_sampler, uv + vec2(0.0, texel.y), 0);
+
+    // Reconstruct positions
+    let pos_c = get_view_pos(uv, depth);
+    let pos_r = get_view_pos(uv + vec2(texel.x, 0.0), depth_r);
+    let pos_u = get_view_pos(uv + vec2(0.0, texel.y), depth_u);
+
+    // Compute normal from cross product
+    let dx = pos_r - pos_c;
+    let dy = pos_u - pos_c;
+    let normal = normalize(cross(dy, dx));
+
+    return normal;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let current = textureSampleLevel(current_gi, linear_sampler, in.uv, 0.0);
@@ -1684,12 +1727,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let depth_threshold = 0.05;
     let depth_weight = 1.0 - saturate(depth_diff / depth_threshold);
 
+    // Normal-based rejection - reject history when surface orientation changes
+    let current_normal = get_normal_from_depth(in.uv, current_depth);
+    let prev_normal = get_normal_from_depth(in.uv, prev_depth);
+    let normal_similarity = max(0.0, dot(current_normal, prev_normal));
+    // Threshold at 0.9 (~25 degree difference) for rejection
+    let normal_weight = smoothstep(0.7, 0.95, normal_similarity);
+
     // Temporal blend (95% history when stable - more aggressive for noise reduction)
     let base_blend = 0.95;
 
+    // Combine depth and normal weights for disocclusion
+    let disocclusion_weight = depth_weight * normal_weight;
+
     // Even during disocclusion, keep some temporal stability to avoid harsh noise
     let min_blend = 0.5; // Never go below 50% history to reduce visible noise
-    let temporal_blend = mix(min_blend, base_blend, depth_weight);
+    let temporal_blend = mix(min_blend, base_blend, disocclusion_weight);
 
     // Check if history is valid (more lenient check)
     let history_valid = select(0.7, 1.0, prev_depth > 0.0001);

@@ -542,7 +542,7 @@ impl RenApp {
         // Create tonemapping pass
         let mut tonemapping = TonemappingPass::new();
         tonemapping.set_exposure(1.5);
-        tonemapping.set_mode(TonemappingMode::Aces);
+        tonemapping.set_mode(TonemappingMode::AgX);
         tonemapping.init(&device, surface_format);
 
         // Create FXAA pass
@@ -2908,14 +2908,9 @@ impl RenApp {
         });
         self.vignette_view = self.vignette_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Adjust tonemapping for HDR output
-        if enabled {
-            // For HDR displays, use a gentler curve that preserves more dynamic range
-            self.tonemapping.set_mode(TonemappingMode::AgX);
-        } else {
-            // Standard SDR settings
-            self.tonemapping.set_mode(TonemappingMode::Aces);
-        }
+        // AgX works well for both HDR and SDR - no need to switch modes
+        // AgX naturally desaturates bright lights, avoiding the ACES "notorious six" color clipping
+        self.tonemapping.set_mode(TonemappingMode::AgX);
 
         true
     }
