@@ -51,6 +51,8 @@ pub enum PCFMode {
     Soft5x5 = 3,
     /// Poisson disk sampling (16 samples).
     PoissonDisk = 4,
+    /// PCSS (Percentage-Closer Soft Shadows) with variable penumbra.
+    PCSS = 5,
 }
 
 impl PCFMode {
@@ -62,7 +64,72 @@ impl PCFMode {
             Self::Soft3x3 => 9,
             Self::Soft5x5 => 25,
             Self::PoissonDisk => 16,
+            Self::PCSS => 32, // 16 blocker search + 16 PCF
         }
+    }
+}
+
+/// PCSS (Percentage-Closer Soft Shadows) configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct PCSSConfig {
+    /// Light size in world units. Larger = softer shadows.
+    pub light_size: f32,
+    /// Number of samples for blocker search (should be power of 2).
+    pub blocker_search_samples: u32,
+    /// Number of samples for PCF filtering (should be power of 2).
+    pub pcf_samples: u32,
+    /// Maximum filter radius in texels.
+    pub max_filter_radius: f32,
+    /// Near plane for penumbra calculation.
+    pub near_plane: f32,
+}
+
+impl Default for PCSSConfig {
+    fn default() -> Self {
+        Self {
+            light_size: 0.5,
+            blocker_search_samples: 16,
+            pcf_samples: 16,
+            max_filter_radius: 10.0,
+            near_plane: 0.1,
+        }
+    }
+}
+
+impl PCSSConfig {
+    /// Create a new PCSS configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the light size (larger = softer shadows).
+    pub fn light_size(mut self, size: f32) -> Self {
+        self.light_size = size.max(0.01);
+        self
+    }
+
+    /// Set the number of blocker search samples.
+    pub fn blocker_search_samples(mut self, samples: u32) -> Self {
+        self.blocker_search_samples = samples.clamp(4, 64);
+        self
+    }
+
+    /// Set the number of PCF samples.
+    pub fn pcf_samples(mut self, samples: u32) -> Self {
+        self.pcf_samples = samples.clamp(4, 64);
+        self
+    }
+
+    /// Set the maximum filter radius in texels.
+    pub fn max_filter_radius(mut self, radius: f32) -> Self {
+        self.max_filter_radius = radius.clamp(1.0, 50.0);
+        self
+    }
+
+    /// Set the near plane for penumbra calculation.
+    pub fn near_plane(mut self, near: f32) -> Self {
+        self.near_plane = near.max(0.001);
+        self
     }
 }
 
@@ -83,6 +150,8 @@ pub struct ShadowConfig {
     pub fade_start: f32,
     /// Whether shadows are enabled.
     pub enabled: bool,
+    /// PCSS configuration (used when pcf_mode is PCSS).
+    pub pcss: PCSSConfig,
 }
 
 impl Default for ShadowConfig {
@@ -95,6 +164,7 @@ impl Default for ShadowConfig {
             max_distance: 100.0,
             fade_start: 0.9,
             enabled: true,
+            pcss: PCSSConfig::default(),
         }
     }
 }
@@ -146,6 +216,25 @@ impl ShadowConfig {
     /// Set whether shadows are enabled.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
+        self
+    }
+
+    /// Set the PCSS configuration.
+    pub fn pcss_config(mut self, config: PCSSConfig) -> Self {
+        self.pcss = config;
+        self
+    }
+
+    /// Enable PCSS with default settings.
+    pub fn with_pcss(mut self) -> Self {
+        self.pcf_mode = PCFMode::PCSS;
+        self
+    }
+
+    /// Enable PCSS with custom light size.
+    pub fn with_pcss_light_size(mut self, light_size: f32) -> Self {
+        self.pcf_mode = PCFMode::PCSS;
+        self.pcss.light_size = light_size;
         self
     }
 }

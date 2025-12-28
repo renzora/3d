@@ -29,7 +29,7 @@ mod shadow_pass;
 
 pub use cascade::CascadedShadowMap;
 pub use point_shadow::{CubeFace, PointShadowMap};
-pub use shadow_config::{CascadeConfig, PCFMode, ShadowConfig, ShadowQuality};
+pub use shadow_config::{CascadeConfig, PCFMode, PCSSConfig, ShadowConfig, ShadowQuality};
 pub use shadow_map::{ShadowAtlas, ShadowMap, ShadowUniform};
 pub use shadow_pass::ShadowPass;
 

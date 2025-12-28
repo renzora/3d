@@ -35,8 +35,10 @@ struct ShadowUniform {
     shadow_map_size: vec4<f32>,
     // Spot light direction (xyz) and range (w)
     spot_direction: vec4<f32>,
-    // Spot light params: x=outer_cos, y=inner_cos, z=intensity, w=unused
+    // Spot light params: x=outer_cos, y=inner_cos, z=intensity, w=pcf_mode
     spot_params: vec4<f32>,
+    // PCSS params: x=light_size, y=near_plane, z=blocker_search_radius, w=max_filter_radius
+    pcss_params: vec4<f32>,
 }
 
 struct ModelUniform {
@@ -273,6 +275,147 @@ fn calculate_ibl(
     return ambient;
 }
 
+// ============ PCSS (Percentage-Closer Soft Shadows) ============
+
+// Poisson disk samples for randomized shadow sampling (16 samples)
+const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>(0.94558609, -0.76890725),
+    vec2<f32>(-0.094184101, -0.92938870),
+    vec2<f32>(0.34495938, 0.29387760),
+    vec2<f32>(-0.91588581, 0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543, 0.27676845),
+    vec2<f32>(0.97484398, 0.75648379),
+    vec2<f32>(0.44323325, -0.97511554),
+    vec2<f32>(0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>(0.79197514, 0.19090188),
+    vec2<f32>(-0.24188840, 0.99706507),
+    vec2<f32>(-0.81409955, 0.91437590),
+    vec2<f32>(0.19984126, 0.78641367),
+    vec2<f32>(0.14383161, -0.14100790)
+);
+
+// Interleaved gradient noise for sample rotation (avoids banding)
+fn interleaved_gradient_noise_shadow(pos: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pos, magic.xy)));
+}
+
+// Rotate a 2D vector by angle
+fn rotate_2d(v: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
+}
+
+// PCSS Step 1: Blocker search - find average blocker depth
+fn pcss_blocker_search(uv: vec2<f32>, receiver_depth: f32, search_radius: f32, screen_pos: vec2<f32>) -> vec2<f32> {
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+
+    let texel_size = shadow.shadow_map_size.zw;
+    let rotation = interleaved_gradient_noise_shadow(screen_pos) * 6.28318530718; // 2*PI
+
+    // Sample shadow map to find blockers (objects between light and receiver)
+    for (var i = 0u; i < 16u; i++) {
+        let offset = rotate_2d(POISSON_DISK[i], rotation) * search_radius * texel_size;
+        let sample_uv = uv + offset;
+
+        // Use textureLoad to get raw depth (need level 0)
+        let sample_coord = vec2<i32>(sample_uv * shadow.shadow_map_size.xy);
+        let clamped_coord = clamp(sample_coord, vec2<i32>(0), vec2<i32>(shadow.shadow_map_size.xy) - vec2<i32>(1));
+        let blocker_depth = textureLoad(shadow_map, clamped_coord, 0);
+
+        // If blocker is closer to light than receiver, it's a blocker
+        if (blocker_depth < receiver_depth) {
+            blocker_sum += blocker_depth;
+            blocker_count += 1.0;
+        }
+    }
+
+    // Return (average blocker depth, blocker count)
+    if (blocker_count > 0.0) {
+        return vec2<f32>(blocker_sum / blocker_count, blocker_count);
+    }
+    return vec2<f32>(-1.0, 0.0); // No blockers found
+}
+
+// PCSS Step 2: Estimate penumbra size based on blocker distance
+fn pcss_estimate_penumbra(receiver_depth: f32, blocker_depth: f32) -> f32 {
+    let light_size = shadow.pcss_params.x;
+    let near_plane = shadow.pcss_params.y;
+
+    // Penumbra width = (receiver - blocker) * lightSize / blocker
+    // This is derived from similar triangles in the shadow geometry
+    let penumbra = (receiver_depth - blocker_depth) * light_size / blocker_depth;
+
+    return penumbra;
+}
+
+// PCSS Step 3: PCF with variable filter radius
+fn pcss_pcf(uv: vec2<f32>, receiver_depth: f32, filter_radius: f32, screen_pos: vec2<f32>) -> f32 {
+    var shadow_sum = 0.0;
+    let texel_size = shadow.shadow_map_size.zw;
+    let rotation = interleaved_gradient_noise_shadow(screen_pos) * 6.28318530718;
+
+    for (var i = 0u; i < 16u; i++) {
+        let offset = rotate_2d(POISSON_DISK[i], rotation) * filter_radius * texel_size;
+        let sample_uv = uv + offset;
+        shadow_sum += textureSampleCompare(shadow_map, shadow_sampler, sample_uv, receiver_depth);
+    }
+
+    return shadow_sum / 16.0;
+}
+
+// Full PCSS algorithm
+fn calculate_shadow_pcss(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, screen_pos: vec2<f32>) -> f32 {
+    // Transform to light space
+    let light_space_pos = shadow.light_view_proj * vec4<f32>(world_pos, 1.0);
+    let proj_coords_raw = light_space_pos.xyz / light_space_pos.w;
+
+    let proj_x = proj_coords_raw.x * 0.5 + 0.5;
+    let proj_y = proj_coords_raw.y * -0.5 + 0.5;
+    let proj_z = proj_coords_raw.z;
+
+    // Apply bias
+    let bias = shadow.shadow_params.x;
+    let normal_bias = shadow.shadow_params.y;
+    let cos_angle = max(dot(normal, to_light), 0.0);
+    let slope_bias = bias + normal_bias * (1.0 - cos_angle);
+    let receiver_depth = proj_z - slope_bias;
+
+    let uv = clamp(vec2<f32>(proj_x, proj_y), vec2<f32>(0.001), vec2<f32>(0.999));
+
+    // Check bounds
+    let in_bounds = step(0.0, proj_x) * step(proj_x, 1.0) * step(0.0, proj_y) * step(proj_y, 1.0) * step(0.0, proj_z) * step(proj_z, 1.0);
+    if (in_bounds < 0.5) {
+        return 1.0;
+    }
+
+    // Step 1: Blocker search
+    let search_radius = shadow.pcss_params.z;
+    let blocker_result = pcss_blocker_search(uv, proj_z, search_radius, screen_pos);
+
+    // No blockers found - fully lit
+    if (blocker_result.y < 0.5) {
+        return 1.0;
+    }
+
+    // Step 2: Estimate penumbra size
+    let penumbra = pcss_estimate_penumbra(proj_z, blocker_result.x);
+
+    // Clamp filter radius
+    let max_radius = shadow.pcss_params.w;
+    let filter_radius = clamp(penumbra * shadow.shadow_map_size.x, 1.0, max_radius);
+
+    // Step 3: PCF with variable radius
+    let shadow_factor = pcss_pcf(uv, receiver_depth, filter_radius, screen_pos);
+
+    return shadow_factor;
+}
+
 // Calculate shadow factor for directional/spot lights (2D shadow map)
 fn calculate_shadow_2d(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>) -> f32 {
     // Transform to light space
@@ -345,8 +488,8 @@ fn calculate_shadow_cube(world_pos: vec3<f32>, normal: vec3<f32>, light_pos: vec
     return mix(1.0, shadow_factor, in_range);
 }
 
-// Calculate shadow factor based on light type
-fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, light_type: f32) -> f32 {
+// Calculate shadow factor based on light type and PCF mode
+fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>, light_type: f32, screen_pos: vec2<f32>) -> f32 {
     let shadows_on = step(0.5, shadow.shadow_params.z);
 
     if (shadows_on < 0.5) {
@@ -355,12 +498,20 @@ fn calculate_shadow(world_pos: vec3<f32>, normal: vec3<f32>, to_light: vec3<f32>
 
     // Use cube shadow for point lights, 2D shadow for directional/spot
     if (light_type > 1.5) {
-        // Point light - use cube shadow map
+        // Point light - use cube shadow map (PCSS not supported for cube maps)
         let light_pos = shadow.light_dir_or_pos.xyz;
         return calculate_shadow_cube(world_pos, normal, light_pos);
     } else {
-        // Directional or spot - use 2D shadow map
-        return calculate_shadow_2d(world_pos, normal, to_light);
+        // Check PCF mode (stored in spot_params.w)
+        let pcf_mode = shadow.spot_params.w;
+
+        // PCSS mode = 5
+        if (pcf_mode > 4.5) {
+            return calculate_shadow_pcss(world_pos, normal, to_light, screen_pos);
+        } else {
+            // Standard PCF modes (0-4)
+            return calculate_shadow_2d(world_pos, normal, to_light);
+        }
     }
 }
 
@@ -373,6 +524,7 @@ fn calculate_shadow_light(
     albedo: vec3<f32>,
     metallic: f32,
     roughness: f32,
+    screen_pos: vec2<f32>,
 ) -> vec3<f32> {
     // Check if shadow light is enabled
     let shadows_enabled = shadow.shadow_params.z;
@@ -443,7 +595,7 @@ fn calculate_shadow_light(
     let n_dot_l = max(dot(n, light_dir), 0.0);
 
     // Get shadow factor
-    let shadow_factor = calculate_shadow(world_pos, n, light_dir, light_type);
+    let shadow_factor = calculate_shadow(world_pos, n, light_dir, light_type, screen_pos);
 
     return (kd * albedo / PI + specular) * radiance * n_dot_l * shadow_factor;
 }
@@ -489,7 +641,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var lo = vec3<f32>(0.0);
 
     // Shadow-casting light (directional, spot, or point)
-    lo += calculate_shadow_light(in.world_position, n, v, f0, albedo, metallic, roughness);
+    lo += calculate_shadow_light(in.world_position, n, v, f0, albedo, metallic, roughness, in.clip_position.xy);
 
     // Light 0 - Key light (configurable)
     if (camera.light0_color.w > 0.5) {

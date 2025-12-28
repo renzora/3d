@@ -51,8 +51,10 @@ pub struct WebShadowUniform {
     pub shadow_map_size: [f32; 4],
     /// Spot direction (xyz) and range (w)
     pub spot_direction: [f32; 4],
-    /// Spot params: x=outer_cos, y=inner_cos, z=intensity, w=unused
+    /// Spot params: x=outer_cos, y=inner_cos, z=intensity, w=pcf_mode
     pub spot_params: [f32; 4],
+    /// PCSS params: x=light_size, y=near_plane, z=blocker_search_radius, w=max_filter_radius
+    pub pcss_params: [f32; 4],
 }
 
 impl Default for WebShadowUniform {
@@ -63,7 +65,8 @@ impl Default for WebShadowUniform {
             light_dir_or_pos: [-0.5, -1.0, -0.3, 0.0],
             shadow_map_size: [1024.0, 1024.0, 1.0 / 1024.0, 1.0 / 1024.0],
             spot_direction: [0.0, -1.0, 0.0, 10.0], // direction (0,-1,0), range 10
-            spot_params: [0.9063, 0.9659, 1.0, 0.0], // cos(25°), cos(15°), intensity 1
+            spot_params: [0.9063, 0.9659, 1.0, 2.0], // cos(25°), cos(15°), intensity 1, pcf_mode (Soft3x3)
+            pcss_params: [0.5, 0.1, 5.0, 10.0], // light_size, near_plane, blocker_search_radius, max_filter_radius
         }
     }
 }
@@ -1143,7 +1146,13 @@ impl RenApp {
                         light_dir_or_pos: [light_dir.x, light_dir.y, light_dir.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [0.0, -1.0, 0.0, 10.0],
-                        spot_params: [0.9063, 0.9659, 1.0, 0.0],
+                        spot_params: [0.9063, 0.9659, 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        pcss_params: [
+                            self.shadow_config.pcss.light_size,
+                            self.shadow_config.pcss.near_plane,
+                            5.0, // blocker search radius in texels
+                            self.shadow_config.pcss.max_filter_radius,
+                        ],
                     };
                     (view_proj, uniform)
                 },
@@ -1171,7 +1180,13 @@ impl RenApp {
                         light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [spot_dir.x, spot_dir.y, spot_dir.z, self.spot_range],
-                        spot_params: [self.spot_outer_angle.cos(), self.spot_inner_angle.cos(), 1.0, 0.0],
+                        spot_params: [self.spot_outer_angle.cos(), self.spot_inner_angle.cos(), 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        pcss_params: [
+                            self.shadow_config.pcss.light_size,
+                            self.shadow_config.pcss.near_plane,
+                            5.0,
+                            self.shadow_config.pcss.max_filter_radius,
+                        ],
                     };
                     (view_proj, uniform)
                 },
@@ -1193,7 +1208,13 @@ impl RenApp {
                         light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [0.0, -1.0, 0.0, self.spot_range], // w = range for cube sampling
-                        spot_params: [0.0, 0.0, 1.0, 0.0],
+                        spot_params: [0.0, 0.0, 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        pcss_params: [
+                            self.shadow_config.pcss.light_size,
+                            self.shadow_config.pcss.near_plane,
+                            5.0,
+                            self.shadow_config.pcss.max_filter_radius,
+                        ],
                     };
                     (view_proj, uniform)
                 },
@@ -2825,7 +2846,7 @@ impl RenApp {
         self.shadow_config.resolution
     }
 
-    /// Set PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk).
+    /// Set PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk, 5=PCSS).
     #[wasm_bindgen]
     pub fn set_shadow_pcf_mode(&mut self, mode: u32) {
         let pcf_mode = match mode {
@@ -2833,12 +2854,13 @@ impl RenApp {
             1 => PCFMode::Hardware2x2,
             2 => PCFMode::Soft3x3,
             3 => PCFMode::Soft5x5,
-            _ => PCFMode::PoissonDisk,
+            4 => PCFMode::PoissonDisk,
+            _ => PCFMode::PCSS,
         };
         self.shadow_config.pcf_mode = pcf_mode;
     }
 
-    /// Get current PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk).
+    /// Get current PCF mode (0=None, 1=Hardware2x2, 2=Soft3x3, 3=Soft5x5, 4=PoissonDisk, 5=PCSS).
     #[wasm_bindgen]
     pub fn get_shadow_pcf_mode(&self) -> u32 {
         match self.shadow_config.pcf_mode {
@@ -2847,6 +2869,7 @@ impl RenApp {
             PCFMode::Soft3x3 => 2,
             PCFMode::Soft5x5 => 3,
             PCFMode::PoissonDisk => 4,
+            PCFMode::PCSS => 5,
         }
     }
 
@@ -2872,6 +2895,32 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn get_shadow_normal_bias(&self) -> f32 {
         self.shadow_config.normal_bias
+    }
+
+    // ========== PCSS Settings ==========
+
+    /// Set PCSS light size (0.1 - 10.0, default 0.5). Larger = softer shadows.
+    #[wasm_bindgen]
+    pub fn set_pcss_light_size(&mut self, light_size: f32) {
+        self.shadow_config.pcss.light_size = light_size.clamp(0.1, 10.0);
+    }
+
+    /// Get current PCSS light size.
+    #[wasm_bindgen]
+    pub fn get_pcss_light_size(&self) -> f32 {
+        self.shadow_config.pcss.light_size
+    }
+
+    /// Set PCSS max filter radius in texels (1.0 - 50.0, default 10.0).
+    #[wasm_bindgen]
+    pub fn set_pcss_max_filter_radius(&mut self, radius: f32) {
+        self.shadow_config.pcss.max_filter_radius = radius.clamp(1.0, 50.0);
+    }
+
+    /// Get current PCSS max filter radius.
+    #[wasm_bindgen]
+    pub fn get_pcss_max_filter_radius(&self) -> f32 {
+        self.shadow_config.pcss.max_filter_radius
     }
 
     /// Set number of shadow cascades for directional lights (1-4).

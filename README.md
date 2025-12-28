@@ -679,7 +679,8 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 ### 14.5.7 Advanced Shadows (`src/shadows/`)
 | File | Description | Status |
 |------|-------------|--------|
-| `pcss.rs` | Percentage-Closer Soft Shadows (penumbra) | |
+| `shadow_config.rs` | PCSS configuration (PCSSConfig) | ✅ |
+| `pbr_textured.wgsl` | PCSS shader implementation | ✅ |
 | `contact_shadows.rs` | Screen-space contact shadows | |
 | `shadow_denoiser.rs` | Temporal shadow denoising | |
 
@@ -764,6 +765,25 @@ API:
 - Replaces crude "sample highest mip" approximation
 ```
 
+**PCSS (Percentage-Closer Soft Shadows) ✅ IMPLEMENTED**
+```
+- Variable penumbra based on blocker distance
+- Realistic soft shadows that get softer further from occluder
+- Three-step algorithm:
+  1. Blocker search (16 Poisson samples)
+  2. Penumbra estimation from similar triangles
+  3. PCF with variable filter radius
+- Interleaved gradient noise for sample rotation (no banding)
+- Configurable light size (larger = softer shadows)
+- Configurable max filter radius
+- src/shadows/shadow_config.rs - PCSSConfig struct
+- src/shaders/pbr_textured.wgsl - PCSS shader functions
+API:
+  app.set_shadow_pcf_mode(5)          // Enable PCSS
+  app.set_pcss_light_size(0.5)        // Light size (0.1-10.0)
+  app.set_pcss_max_filter_radius(10)  // Max blur radius
+```
+
 **Spherical Harmonics**
 ```
 - L2 (9 coefficients) sufficient for diffuse
@@ -788,7 +808,7 @@ API:
 | 2 | HDR Display Output (10-bit/16-bit) | High | Medium | ✅ Done |
 | 3 | HDR/EXR Skybox Loading | High | Medium | ✅ Done |
 | 4 | Irradiance Map (diffuse IBL) | High | Medium | ✅ Done |
-| 5 | PCSS Soft Shadows | Medium | Low | |
+| 5 | PCSS Soft Shadows | Medium | Low | ✅ Done |
 | 6 | Contact Shadows | Medium | Low | |
 | 7 | GTAO | Medium | Medium | |
 | 8 | Spherical Harmonics | Medium | Medium | |

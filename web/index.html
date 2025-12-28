@@ -393,6 +393,7 @@
                         <option value="2" selected>3x3</option>
                         <option value="3">5x5</option>
                         <option value="4">Poisson</option>
+                        <option value="5">PCSS (Soft)</option>
                     </select>
                 </label>
                 <label>
@@ -405,6 +406,18 @@
                     <input type="range" id="shadow-normal-bias" min="0" max="0.1" step="0.005" value="0.02">
                     <span class="value" id="shadow-normal-bias-val">0.02</span>
                 </label>
+                <div id="pcss-controls" style="display: none;">
+                    <label>
+                        PCSS Light Size
+                        <input type="range" id="pcss-light-size" min="0.1" max="5.0" step="0.1" value="0.5">
+                        <span class="value" id="pcss-light-size-val">0.5</span>
+                    </label>
+                    <label>
+                        PCSS Max Radius
+                        <input type="range" id="pcss-max-radius" min="1" max="30" step="1" value="10">
+                        <span class="value" id="pcss-max-radius-val">10</span>
+                    </label>
+                </div>
                 <label>
                     Cascades
                     <select id="shadow-cascades">
@@ -1031,7 +1044,10 @@
                     if (app.set_shadow_resolution) app.set_shadow_resolution(parseInt(e.target.value));
                 });
                 document.getElementById('shadow-pcf').addEventListener('change', (e) => {
-                    if (app.set_shadow_pcf_mode) app.set_shadow_pcf_mode(parseInt(e.target.value));
+                    const val = parseInt(e.target.value);
+                    if (app.set_shadow_pcf_mode) app.set_shadow_pcf_mode(val);
+                    // Show/hide PCSS controls based on mode
+                    document.getElementById('pcss-controls').style.display = (val === 5) ? 'block' : 'none';
                 });
                 document.getElementById('shadow-bias').addEventListener('input', (e) => {
                     const val = parseFloat(e.target.value);
@@ -1042,6 +1058,17 @@
                     const val = parseFloat(e.target.value);
                     if (app.set_shadow_normal_bias) app.set_shadow_normal_bias(val);
                     document.getElementById('shadow-normal-bias-val').textContent = val.toFixed(3);
+                });
+                // PCSS controls
+                document.getElementById('pcss-light-size').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_pcss_light_size) app.set_pcss_light_size(val);
+                    document.getElementById('pcss-light-size-val').textContent = val.toFixed(1);
+                });
+                document.getElementById('pcss-max-radius').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_pcss_max_filter_radius) app.set_pcss_max_filter_radius(val);
+                    document.getElementById('pcss-max-radius-val').textContent = val.toFixed(0);
                 });
                 document.getElementById('shadow-cascades').addEventListener('change', (e) => {
                     if (app.set_shadow_cascades) app.set_shadow_cascades(parseInt(e.target.value));
