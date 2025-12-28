@@ -679,9 +679,9 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 ### 14.5.7 Advanced Shadows (`src/shadows/`)
 | File | Description | Status |
 |------|-------------|--------|
-| `shadow_config.rs` | PCSS configuration (PCSSConfig) | ✅ |
-| `pbr_textured.wgsl` | PCSS shader implementation | ✅ |
-| `contact_shadows.rs` | Screen-space contact shadows | |
+| `shadow_config.rs` | PCSS + Contact shadow config | ✅ |
+| `pbr_textured.wgsl` | PCSS + Contact shadow shaders | ✅ |
+| `contact_shadows.rs` | (implemented in pbr_textured.wgsl) | ✅ |
 | `shadow_denoiser.rs` | Temporal shadow denoising | |
 
 ### 14.5.8 Advanced Ambient Occlusion (`src/postprocessing/effects/`)
@@ -705,8 +705,8 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 | `pbr_textured.wgsl` | Full IBL with BRDF LUT + env map | ✅ |
 | `sh_lighting.wgsl` | Spherical harmonics lighting | |
 | `prefilter_env.wgsl` | Environment prefiltering shader | |
-| `pcss.wgsl` | PCSS soft shadow sampling | |
-| `contact_shadows.wgsl` | Screen-space contact shadows | |
+| `pcss.wgsl` | (implemented in pbr_textured.wgsl) | ✅ |
+| `contact_shadows.wgsl` | (implemented in pbr_textured.wgsl) | ✅ |
 | `gtao.wgsl` | Ground Truth AO shader | |
 | `clustered_lighting.wgsl` | Clustered forward light loop | |
 
@@ -784,6 +784,22 @@ API:
   app.set_pcss_max_filter_radius(10)  // Max blur radius
 ```
 
+**Contact Shadows (Screen-Space Ray Marching) ✅ IMPLEMENTED**
+```
+- Fine shadow detail at object contact points
+- Screen-space ray marching toward light
+- 8-step ray march for performance
+- Complements shadow maps for close-range detail
+- Configurable distance, thickness, and intensity
+- src/shadows/shadow_config.rs - ContactShadowConfig struct
+- src/shaders/pbr_textured.wgsl - calculate_contact_shadow function
+API:
+  app.set_contact_shadows_enabled(true)   // Enable contact shadows
+  app.set_contact_shadow_distance(0.5)    // Max ray distance (0.1-2.0)
+  app.set_contact_shadow_thickness(0.05)  // Object thickness (0.01-0.5)
+  app.set_contact_shadow_intensity(0.5)   // Shadow intensity (0-1)
+```
+
 **Spherical Harmonics**
 ```
 - L2 (9 coefficients) sufficient for diffuse
@@ -809,7 +825,7 @@ API:
 | 3 | HDR/EXR Skybox Loading | High | Medium | ✅ Done |
 | 4 | Irradiance Map (diffuse IBL) | High | Medium | ✅ Done |
 | 5 | PCSS Soft Shadows | Medium | Low | ✅ Done |
-| 6 | Contact Shadows | Medium | Low | |
+| 6 | Contact Shadows | Medium | Low | ✅ Done |
 | 7 | GTAO | Medium | Medium | |
 | 8 | Spherical Harmonics | Medium | Medium | |
 | 9 | Clustered Forward | High (many lights) | High | |

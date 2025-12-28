@@ -55,6 +55,8 @@ pub struct WebShadowUniform {
     pub spot_params: [f32; 4],
     /// PCSS params: x=light_size, y=near_plane, z=blocker_search_radius, w=max_filter_radius
     pub pcss_params: [f32; 4],
+    /// Contact shadow params: x=enabled, y=max_distance, z=thickness, w=intensity
+    pub contact_params: [f32; 4],
 }
 
 impl Default for WebShadowUniform {
@@ -67,6 +69,7 @@ impl Default for WebShadowUniform {
             spot_direction: [0.0, -1.0, 0.0, 10.0], // direction (0,-1,0), range 10
             spot_params: [0.9063, 0.9659, 1.0, 2.0], // cos(25°), cos(15°), intensity 1, pcf_mode (Soft3x3)
             pcss_params: [0.5, 0.1, 5.0, 10.0], // light_size, near_plane, blocker_search_radius, max_filter_radius
+            contact_params: [0.0, 0.5, 0.05, 0.5], // disabled, max_distance, thickness, intensity
         }
     }
 }
@@ -1153,6 +1156,12 @@ impl RenApp {
                             5.0, // blocker search radius in texels
                             self.shadow_config.pcss.max_filter_radius,
                         ],
+                        contact_params: [
+                            if self.shadow_config.contact.enabled { 1.0 } else { 0.0 },
+                            self.shadow_config.contact.max_distance,
+                            self.shadow_config.contact.thickness,
+                            self.shadow_config.contact.intensity,
+                        ],
                     };
                     (view_proj, uniform)
                 },
@@ -1187,6 +1196,12 @@ impl RenApp {
                             5.0,
                             self.shadow_config.pcss.max_filter_radius,
                         ],
+                        contact_params: [
+                            if self.shadow_config.contact.enabled { 1.0 } else { 0.0 },
+                            self.shadow_config.contact.max_distance,
+                            self.shadow_config.contact.thickness,
+                            self.shadow_config.contact.intensity,
+                        ],
                     };
                     (view_proj, uniform)
                 },
@@ -1214,6 +1229,12 @@ impl RenApp {
                             self.shadow_config.pcss.near_plane,
                             5.0,
                             self.shadow_config.pcss.max_filter_radius,
+                        ],
+                        contact_params: [
+                            if self.shadow_config.contact.enabled { 1.0 } else { 0.0 },
+                            self.shadow_config.contact.max_distance,
+                            self.shadow_config.contact.thickness,
+                            self.shadow_config.contact.intensity,
                         ],
                     };
                     (view_proj, uniform)
@@ -2921,6 +2942,56 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn get_pcss_max_filter_radius(&self) -> f32 {
         self.shadow_config.pcss.max_filter_radius
+    }
+
+    // ========== Contact Shadow Settings ==========
+
+    /// Enable or disable contact shadows.
+    #[wasm_bindgen]
+    pub fn set_contact_shadows_enabled(&mut self, enabled: bool) {
+        self.shadow_config.contact.enabled = enabled;
+    }
+
+    /// Check if contact shadows are enabled.
+    #[wasm_bindgen]
+    pub fn get_contact_shadows_enabled(&self) -> bool {
+        self.shadow_config.contact.enabled
+    }
+
+    /// Set contact shadow max distance (0.1 - 2.0, default 0.5).
+    #[wasm_bindgen]
+    pub fn set_contact_shadow_distance(&mut self, distance: f32) {
+        self.shadow_config.contact.max_distance = distance.clamp(0.1, 2.0);
+    }
+
+    /// Get current contact shadow max distance.
+    #[wasm_bindgen]
+    pub fn get_contact_shadow_distance(&self) -> f32 {
+        self.shadow_config.contact.max_distance
+    }
+
+    /// Set contact shadow thickness (0.01 - 0.5, default 0.05).
+    #[wasm_bindgen]
+    pub fn set_contact_shadow_thickness(&mut self, thickness: f32) {
+        self.shadow_config.contact.thickness = thickness.clamp(0.01, 0.5);
+    }
+
+    /// Get current contact shadow thickness.
+    #[wasm_bindgen]
+    pub fn get_contact_shadow_thickness(&self) -> f32 {
+        self.shadow_config.contact.thickness
+    }
+
+    /// Set contact shadow intensity (0.0 - 1.0, default 0.5).
+    #[wasm_bindgen]
+    pub fn set_contact_shadow_intensity(&mut self, intensity: f32) {
+        self.shadow_config.contact.intensity = intensity.clamp(0.0, 1.0);
+    }
+
+    /// Get current contact shadow intensity.
+    #[wasm_bindgen]
+    pub fn get_contact_shadow_intensity(&self) -> f32 {
+        self.shadow_config.contact.intensity
     }
 
     /// Set number of shadow cascades for directional lights (1-4).

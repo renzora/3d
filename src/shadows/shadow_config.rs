@@ -133,6 +133,70 @@ impl PCSSConfig {
     }
 }
 
+/// Contact shadow configuration for screen-space contact shadows.
+#[derive(Debug, Clone, Copy)]
+pub struct ContactShadowConfig {
+    /// Whether contact shadows are enabled.
+    pub enabled: bool,
+    /// Maximum ray distance in world units.
+    pub max_distance: f32,
+    /// Thickness of objects for ray marching.
+    pub thickness: f32,
+    /// Number of ray march steps (quality vs performance).
+    pub steps: u32,
+    /// Intensity of contact shadows (0.0 - 1.0).
+    pub intensity: f32,
+}
+
+impl Default for ContactShadowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_distance: 0.5,
+            thickness: 0.05,
+            steps: 8,
+            intensity: 0.5,
+        }
+    }
+}
+
+impl ContactShadowConfig {
+    /// Create a new contact shadow configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable contact shadows.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Set maximum ray distance in world units.
+    pub fn max_distance(mut self, distance: f32) -> Self {
+        self.max_distance = distance.clamp(0.1, 2.0);
+        self
+    }
+
+    /// Set object thickness for ray marching.
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.thickness = thickness.clamp(0.01, 0.5);
+        self
+    }
+
+    /// Set number of ray march steps.
+    pub fn steps(mut self, steps: u32) -> Self {
+        self.steps = steps.clamp(4, 32);
+        self
+    }
+
+    /// Set shadow intensity.
+    pub fn intensity(mut self, intensity: f32) -> Self {
+        self.intensity = intensity.clamp(0.0, 1.0);
+        self
+    }
+}
+
 /// Configuration for shadow mapping.
 #[derive(Debug, Clone)]
 pub struct ShadowConfig {
@@ -152,6 +216,8 @@ pub struct ShadowConfig {
     pub enabled: bool,
     /// PCSS configuration (used when pcf_mode is PCSS).
     pub pcss: PCSSConfig,
+    /// Contact shadow configuration.
+    pub contact: ContactShadowConfig,
 }
 
 impl Default for ShadowConfig {
@@ -165,6 +231,7 @@ impl Default for ShadowConfig {
             fade_start: 0.9,
             enabled: true,
             pcss: PCSSConfig::default(),
+            contact: ContactShadowConfig::default(),
         }
     }
 }
@@ -235,6 +302,25 @@ impl ShadowConfig {
     pub fn with_pcss_light_size(mut self, light_size: f32) -> Self {
         self.pcf_mode = PCFMode::PCSS;
         self.pcss.light_size = light_size;
+        self
+    }
+
+    /// Set contact shadow configuration.
+    pub fn contact_config(mut self, config: ContactShadowConfig) -> Self {
+        self.contact = config;
+        self
+    }
+
+    /// Enable contact shadows with default settings.
+    pub fn with_contact_shadows(mut self) -> Self {
+        self.contact.enabled = true;
+        self
+    }
+
+    /// Enable contact shadows with custom intensity.
+    pub fn with_contact_shadows_intensity(mut self, intensity: f32) -> Self {
+        self.contact.enabled = true;
+        self.contact.intensity = intensity.clamp(0.0, 1.0);
         self
     }
 }

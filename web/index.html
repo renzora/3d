@@ -418,6 +418,30 @@
                         <span class="value" id="pcss-max-radius-val">10</span>
                     </label>
                 </div>
+                <div class="subsection">
+                    <h4>Contact Shadows</h4>
+                    <label class="toggle">
+                        <input type="checkbox" id="contact-shadows-enabled">
+                        Enable Contact Shadows
+                    </label>
+                    <div id="contact-shadow-controls">
+                        <label>
+                            Distance
+                            <input type="range" id="contact-shadow-distance" min="0.1" max="2.0" step="0.05" value="0.5">
+                            <span class="value" id="contact-shadow-distance-val">0.5</span>
+                        </label>
+                        <label>
+                            Thickness
+                            <input type="range" id="contact-shadow-thickness" min="0.01" max="0.5" step="0.01" value="0.05">
+                            <span class="value" id="contact-shadow-thickness-val">0.05</span>
+                        </label>
+                        <label>
+                            Intensity
+                            <input type="range" id="contact-shadow-intensity" min="0" max="1" step="0.05" value="0.5">
+                            <span class="value" id="contact-shadow-intensity-val">0.5</span>
+                        </label>
+                    </div>
+                </div>
                 <label>
                     Cascades
                     <select id="shadow-cascades">
@@ -1069,6 +1093,25 @@
                     const val = parseFloat(e.target.value);
                     if (app.set_pcss_max_filter_radius) app.set_pcss_max_filter_radius(val);
                     document.getElementById('pcss-max-radius-val').textContent = val.toFixed(0);
+                });
+                // Contact shadow controls
+                document.getElementById('contact-shadows-enabled').addEventListener('change', (e) => {
+                    if (app.set_contact_shadows_enabled) app.set_contact_shadows_enabled(e.target.checked);
+                });
+                document.getElementById('contact-shadow-distance').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_contact_shadow_distance) app.set_contact_shadow_distance(val);
+                    document.getElementById('contact-shadow-distance-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('contact-shadow-thickness').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_contact_shadow_thickness) app.set_contact_shadow_thickness(val);
+                    document.getElementById('contact-shadow-thickness-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('contact-shadow-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_contact_shadow_intensity) app.set_contact_shadow_intensity(val);
+                    document.getElementById('contact-shadow-intensity-val').textContent = val.toFixed(2);
                 });
                 document.getElementById('shadow-cascades').addEventListener('change', (e) => {
                     if (app.set_shadow_cascades) app.set_shadow_cascades(parseInt(e.target.value));
