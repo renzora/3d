@@ -20,6 +20,7 @@ use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSe
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
+use crate::ibl::irradiance::generate_sky_irradiance;
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
@@ -219,6 +220,9 @@ pub struct RenApp {
     // Prefiltered environment map for IBL specular
     prefiltered_env_texture: wgpu::Texture,
     prefiltered_env_view: wgpu::TextureView,
+    // Irradiance map for IBL diffuse
+    irradiance_texture: wgpu::Texture,
+    irradiance_view: wgpu::TextureView,
     // BRDF Look-Up Table for IBL
     brdf_lut: BrdfLut,
 }
@@ -694,6 +698,21 @@ impl RenApp {
             array_layer_count: Some(6),
         });
 
+        // ========== Irradiance Map ==========
+        // Generate irradiance cubemap for diffuse IBL
+        // Low-res since irradiance is a low-frequency signal
+        let irradiance_texture = generate_sky_irradiance(&device, &queue, 32);
+        let irradiance_view = irradiance_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Irradiance View"),
+            format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+        });
+
         // Create shadow uniform buffer
         let shadow_uniform = WebShadowUniform::default();
         let shadow_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -920,6 +939,8 @@ impl RenApp {
             skybox_enabled: true,
             prefiltered_env_texture,
             prefiltered_env_view,
+            irradiance_texture,
+            irradiance_view,
             brdf_lut,
         })
     }
@@ -1888,7 +1909,7 @@ impl RenApp {
                 .and_then(|n| gpu_textures.get(n))
                 .unwrap_or(&self.white_texture);
 
-            // Create combined texture + shadow + env + BRDF bind group
+            // Create combined texture + shadow + env + BRDF + irradiance bind group
             let texture_bind_group = self.material
                 .create_texture_shadow_bind_group(
                     &self.device,
@@ -1907,6 +1928,8 @@ impl RenApp {
                     &self.skybox_sampler,
                     self.brdf_lut.view(),
                     self.brdf_lut.sampler(),
+                    &self.irradiance_view,
+                    &self.skybox_sampler,
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -2638,6 +2661,7 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_skybox_hdr(&mut self, data: &[u8]) -> Result<(), JsValue> {
         use crate::loaders::{HdrImage, create_prefiltered_hdr_cubemap};
+        use crate::ibl::generate_irradiance_cubemap;
 
         // Parse HDR/EXR image
         let hdr = HdrImage::from_bytes(data)
@@ -2646,7 +2670,7 @@ impl RenApp {
         let face_size = 256u32; // Good balance of quality and performance
         let mip_levels = 6u32;
 
-        // Create prefiltered cubemap for both skybox and IBL
+        // Create prefiltered cubemap for both skybox and IBL specular
         self.prefiltered_env_texture = create_prefiltered_hdr_cubemap(
             &self.device,
             &self.queue,
@@ -2664,6 +2688,19 @@ impl RenApp {
         let skybox_faces = hdr.to_cubemap_faces_ldr(face_size, 1.0);
         self.skybox_texture = CubeTexture::from_faces_owned(&self.device, &self.queue, &skybox_faces, face_size);
 
+        // Generate irradiance map from HDR for diffuse IBL
+        self.irradiance_texture = generate_irradiance_cubemap(
+            &self.device,
+            &self.queue,
+            &skybox_faces,
+            face_size,
+            32, // Irradiance map can be low-res since it's a low-frequency signal
+        );
+        self.irradiance_view = self.irradiance_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
         // Update skybox bind group
         self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
             &self.device,
@@ -2678,6 +2715,7 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_skybox_hdr_with_options(&mut self, data: &[u8], face_size: u32, exposure: f32) -> Result<(), JsValue> {
         use crate::loaders::{HdrImage, create_prefiltered_hdr_cubemap};
+        use crate::ibl::generate_irradiance_cubemap;
 
         let hdr = HdrImage::from_bytes(data)
             .map_err(|e| JsValue::from_str(&format!("Failed to load HDR: {}", e)))?;
@@ -2685,7 +2723,7 @@ impl RenApp {
         let mip_levels = (face_size as f32).log2().floor() as u32 + 1;
         let mip_levels = mip_levels.min(8).max(1);
 
-        // Create prefiltered cubemap for IBL
+        // Create prefiltered cubemap for IBL specular
         self.prefiltered_env_texture = create_prefiltered_hdr_cubemap(
             &self.device,
             &self.queue,
@@ -2702,6 +2740,19 @@ impl RenApp {
         // Create skybox with custom exposure
         let skybox_faces = hdr.to_cubemap_faces_ldr(face_size, exposure);
         self.skybox_texture = CubeTexture::from_faces_owned(&self.device, &self.queue, &skybox_faces, face_size);
+
+        // Generate irradiance map from HDR for diffuse IBL
+        self.irradiance_texture = generate_irradiance_cubemap(
+            &self.device,
+            &self.queue,
+            &skybox_faces,
+            face_size,
+            32, // Irradiance map can be low-res since it's a low-frequency signal
+        );
+        self.irradiance_view = self.irradiance_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
 
         self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
             &self.device,
@@ -3058,7 +3109,7 @@ impl RenApp {
             _padding: [0.0; 2],
         };
 
-        // Create combined texture + shadow + env + BRDF bind group with default textures
+        // Create combined texture + shadow + env + BRDF + irradiance bind group with default textures
         let texture_bind_group = self.material
             .create_texture_shadow_bind_group(
                 &self.device,
@@ -3077,6 +3128,8 @@ impl RenApp {
                 &self.skybox_sampler,
                 self.brdf_lut.view(),
                 self.brdf_lut.sampler(),
+                &self.irradiance_view,
+                &self.skybox_sampler,
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 

@@ -6,5 +6,7 @@
 //! - Spherical harmonics projection
 
 pub mod prefilter;
+pub mod irradiance;
 
 pub use prefilter::PrefilterGenerator;
+pub use irradiance::{IrradianceGenerator, generate_irradiance_cubemap, generate_sky_irradiance};

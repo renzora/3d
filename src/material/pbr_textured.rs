@@ -380,6 +380,24 @@ impl TexturedPbrMaterial {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Irradiance map for diffuse IBL (binding 15)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 15,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Irradiance sampler (binding 16)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 16,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -446,7 +464,7 @@ impl TexturedPbrMaterial {
         self.needs_update = false;
     }
 
-    /// Create a combined texture + shadow + environment + BRDF LUT bind group.
+    /// Create a combined texture + shadow + environment + BRDF LUT + irradiance bind group.
     pub fn create_texture_shadow_bind_group(
         &self,
         device: &wgpu::Device,
@@ -465,6 +483,8 @@ impl TexturedPbrMaterial {
         env_sampler: &wgpu::Sampler,
         brdf_lut_view: &wgpu::TextureView,
         brdf_lut_sampler: &wgpu::Sampler,
+        irradiance_view: &wgpu::TextureView,
+        irradiance_sampler: &wgpu::Sampler,
     ) -> Option<wgpu::BindGroup> {
         self.texture_bind_group_layout.as_ref().map(|layout| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -535,6 +555,15 @@ impl TexturedPbrMaterial {
                     wgpu::BindGroupEntry {
                         binding: 14,
                         resource: wgpu::BindingResource::Sampler(brdf_lut_sampler),
+                    },
+                    // Irradiance map for diffuse IBL (bindings 15-16)
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: wgpu::BindingResource::TextureView(irradiance_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 16,
+                        resource: wgpu::BindingResource::Sampler(irradiance_sampler),
                     },
                 ],
             })

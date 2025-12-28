@@ -100,6 +100,12 @@ var brdf_lut: texture_2d<f32>;
 @group(3) @binding(14)
 var brdf_sampler: sampler;
 
+// Irradiance map for diffuse IBL (pre-convolved for hemisphere integration)
+@group(3) @binding(15)
+var irradiance_map: texture_cube<f32>;
+@group(3) @binding(16)
+var irradiance_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -210,13 +216,14 @@ fn sample_env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
     return env_color;
 }
 
-// Sample environment map for IBL diffuse irradiance
+// Sample irradiance map for IBL diffuse lighting
+// The irradiance map is pre-convolved to represent the integral of incoming light
+// over the hemisphere for each direction, giving proper diffuse IBL
 fn sample_env_diffuse(normal: vec3<f32>) -> vec3<f32> {
-    // For diffuse, sample at highest mip level (most blurred)
-    // This is a crude approximation - proper IBL uses a precomputed irradiance map
-    let mip_level = 4.0; // Use highest mip for maximum blur
-    let env_color = textureSampleLevel(env_map, env_sampler, normal, mip_level).rgb;
-    return env_color;
+    // Sample the pre-convolved irradiance cubemap
+    // Each texel contains the integral: E(n) = ∫_Ω L(ω) * max(0, n·ω) dω
+    let irradiance = textureSample(irradiance_map, irradiance_sampler, normal).rgb;
+    return irradiance;
 }
 
 // Calculate IBL contribution (diffuse + specular) using split-sum approximation

@@ -637,7 +637,7 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 | `mipmap_roughness.rs` | Each mip level = different roughness response | ✅ (in prefilter.rs) |
 | `hdr_loader.rs` | Load HDR/EXR environment maps | ✅ (in loaders/) |
 | `cubemap_converter.rs` | Convert equirect to cubemap with HDR support | ✅ (in hdr_loader.rs) |
-| `irradiance_map.rs` | Diffuse irradiance convolution | |
+| `irradiance.rs` | Diffuse irradiance convolution | ✅ |
 
 ### 14.5.2 BRDF Look-Up Table (`src/texture/`)
 | File | Description | Status |
@@ -753,6 +753,17 @@ API:
   app.set_hdr_output_enabled(true) // Enable HDR output
 ```
 
+**Irradiance Maps ✅ IMPLEMENTED**
+```
+- Pre-convolved cubemap for diffuse IBL
+- Low-res (32x32) since irradiance is low-frequency
+- Cosine-weighted hemisphere sampling
+- Proper integration: E(n) = ∫_Ω L(ω) * max(0, n·ω) dω
+- Auto-regenerated when HDR skybox is loaded
+- src/ibl/irradiance.rs - CPU-side convolution
+- Replaces crude "sample highest mip" approximation
+```
+
 **Spherical Harmonics**
 ```
 - L2 (9 coefficients) sufficient for diffuse
@@ -776,7 +787,7 @@ API:
 | 1 | Pre-filtered Environment Maps | High | Medium | ✅ Done |
 | 2 | HDR Display Output (10-bit/16-bit) | High | Medium | ✅ Done |
 | 3 | HDR/EXR Skybox Loading | High | Medium | ✅ Done |
-| 4 | Irradiance Map (diffuse IBL) | High | Medium | |
+| 4 | Irradiance Map (diffuse IBL) | High | Medium | ✅ Done |
 | 5 | PCSS Soft Shadows | Medium | Low | |
 | 6 | Contact Shadows | Medium | Low | |
 | 7 | GTAO | Medium | Medium | |
