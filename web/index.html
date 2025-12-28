@@ -249,6 +249,15 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>HDR Display</h3>
+                <label>
+                    <input type="checkbox" id="hdr-output" disabled>
+                    Enable 10-bit Output
+                </label>
+                <div id="hdr-status" style="font-size: 11px; color: #888; margin-top: 4px;">Checking...</div>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>Vignette</h3>
                 <label>
                     <input type="checkbox" id="vignette-enabled" checked>
@@ -354,6 +363,11 @@
                     Ground Color
                     <input type="color" id="skybox-ground-color" value="#322d28">
                 </label>
+                <label style="margin-top: 8px;">
+                    HDR Environment
+                    <input type="file" id="skybox-hdr-file" accept=".hdr,.exr" style="font-size: 11px; margin-top: 4px;">
+                </label>
+                <div id="hdr-loading" style="display: none; color: #888; font-size: 11px; margin-top: 4px;">Loading HDR...</div>
             </div>
             <hr class="divider">
             <div class="section">
@@ -912,6 +926,28 @@
                     document.getElementById('exposure-val').textContent = val.toFixed(1);
                 });
 
+                // HDR Display
+                const hdrCheckbox = document.getElementById('hdr-output');
+                const hdrStatus = document.getElementById('hdr-status');
+                if (app.has_hdr_display()) {
+                    hdrCheckbox.disabled = false;
+                    const format = app.get_hdr_display_format();
+                    hdrStatus.textContent = 'Available: ' + format;
+                    hdrStatus.style.color = '#4a4';
+                } else {
+                    hdrStatus.textContent = 'Not available (8-bit display)';
+                    hdrStatus.style.color = '#888';
+                }
+                hdrCheckbox.addEventListener('change', (e) => {
+                    const success = app.set_hdr_output_enabled(e.target.checked);
+                    if (!success) {
+                        e.target.checked = false;
+                        hdrStatus.textContent = 'Failed to enable HDR';
+                    } else {
+                        hdrStatus.textContent = e.target.checked ? 'HDR output active' : 'SDR output';
+                    }
+                });
+
                 // AA controls
                 const aaMode = document.getElementById('aa-mode');
                 function updateAAOptions() {
@@ -1272,6 +1308,27 @@
                 document.getElementById('skybox-sky-color').addEventListener('input', updateSkyColors);
                 document.getElementById('skybox-horizon-color').addEventListener('input', updateSkyColors);
                 document.getElementById('skybox-ground-color').addEventListener('input', updateSkyColors);
+
+                // HDR environment map file input
+                document.getElementById('skybox-hdr-file').addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+
+                    const loadingEl = document.getElementById('hdr-loading');
+                    loadingEl.style.display = 'block';
+                    loadingEl.textContent = 'Loading HDR...';
+
+                    try {
+                        const arrayBuffer = await file.arrayBuffer();
+                        const data = new Uint8Array(arrayBuffer);
+                        await app.set_skybox_hdr(data);
+                        loadingEl.textContent = 'HDR loaded: ' + file.name;
+                        setTimeout(() => { loadingEl.style.display = 'none'; }, 2000);
+                    } catch (err) {
+                        loadingEl.textContent = 'Error: ' + err;
+                        console.error('HDR load error:', err);
+                    }
+                });
 
                 // SSAO bias control
                 document.getElementById('ssao-bias').addEventListener('input', (e) => {

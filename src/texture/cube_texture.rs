@@ -267,4 +267,23 @@ impl CubeTexture {
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
     }
+
+    /// Create a cube texture from 6 RGBA8 face images (owned Vec data).
+    /// Faces must be in order: +X, -X, +Y, -Y, +Z, -Z
+    pub fn from_faces_owned(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        faces: &[Vec<u8>; 6],
+        size: u32,
+    ) -> Self {
+        let face_refs: [&[u8]; 6] = [
+            &faces[0],
+            &faces[1],
+            &faces[2],
+            &faces[3],
+            &faces[4],
+            &faces[5],
+        ];
+        Self::from_faces(device, queue, face_refs, size, Some("HDR Cubemap"))
+    }
 }

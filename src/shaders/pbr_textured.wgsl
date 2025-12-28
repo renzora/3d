@@ -199,11 +199,13 @@ fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> v
     return f0 + (smooth_factor - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-// Sample environment map for IBL specular reflections
+// Sample prefiltered environment map for IBL specular reflections
+// Each mip level is convolved with increasing roughness (GGX importance sampling)
 fn sample_env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
-    // Use mip level based on roughness (crude approximation without prefiltered maps)
-    // For a proper implementation, we'd need a prefiltered environment map
-    let mip_level = roughness * 4.0; // Adjust based on cubemap mip levels
+    // Mip 0 = mirror reflection (roughness 0)
+    // Mip 4 = fully rough (roughness 1)
+    let max_mip = 4.0;
+    let mip_level = roughness * max_mip;
     let env_color = textureSampleLevel(env_map, env_sampler, reflect_dir, mip_level).rgb;
     return env_color;
 }

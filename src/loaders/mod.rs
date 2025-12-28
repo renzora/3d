@@ -4,8 +4,10 @@ mod loader;
 mod loading_manager;
 mod gltf_loader;
 mod obj_loader;
+mod hdr_loader;
 
 pub use loader::*;
 pub use loading_manager::*;
 pub use gltf_loader::*;
 pub use obj_loader::*;
+pub use hdr_loader::*;

@@ -42,7 +42,10 @@ thiserror = "2.0"
 gltf = "1.4"
 
 # Image loading
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr", "exr"] }
+
+# Half-precision floats for HDR textures
+half = "2.4"
 
 # WASM bindings (optional, enabled by default)
 wasm-bindgen = { version = "0.2", optional = true }

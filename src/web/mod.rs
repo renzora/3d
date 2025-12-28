@@ -19,6 +19,7 @@ use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
 use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, Pass};
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
+use crate::ibl::prefilter::generate_prefiltered_sky;
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
@@ -117,6 +118,7 @@ struct LineObject {
 /// The main Ren application for web environments.
 #[wasm_bindgen]
 pub struct RenApp {
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
@@ -171,6 +173,11 @@ pub struct RenApp {
     color_correction: ColorCorrectionPass,
     aa_mode: AaMode,
     surface_format: wgpu::TextureFormat,
+    hdr_format: wgpu::TextureFormat,
+    // HDR display support
+    hdr_display_available: bool,
+    hdr_display_format: Option<wgpu::TextureFormat>,
+    hdr_output_enabled: bool,
     // Hemisphere light state
     hemisphere_enabled: bool,
     hemisphere_sky_color: [f32; 3],
@@ -209,6 +216,9 @@ pub struct RenApp {
     skybox_bind_group: wgpu::BindGroup,
     skybox_sampler: wgpu::Sampler,
     skybox_enabled: bool,
+    // Prefiltered environment map for IBL specular
+    prefiltered_env_texture: wgpu::Texture,
+    prefiltered_env_view: wgpu::TextureView,
     // BRDF Look-Up Table for IBL
     brdf_lut: BrdfLut,
 }
@@ -268,6 +278,20 @@ impl RenApp {
             .map_err(|e| JsValue::from_str(&format!("Failed to get device: {:?}", e)))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
+
+        // Check for HDR display formats (10-bit or 16-bit float)
+        let hdr_display_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| matches!(f,
+                wgpu::TextureFormat::Rgba16Float |
+                wgpu::TextureFormat::Rgb10a2Unorm
+            ));
+
+        let has_hdr_display = hdr_display_format.is_some();
+
+        // Default to SDR sRGB format (can switch to HDR later via API)
         let surface_format = surface_caps
             .formats
             .iter()
@@ -288,6 +312,14 @@ impl RenApp {
 
         surface.configure(&device, &surface_config);
 
+        // Log HDR display capability
+        if has_hdr_display {
+            web_sys::console::log_1(&format!("HDR display supported: {:?}", hdr_display_format.unwrap()).into());
+        }
+
+        // HDR format for scene rendering (before tonemapping)
+        let hdr_format = wgpu::TextureFormat::Rgba16Float;
+
         let depth_format = wgpu::TextureFormat::Depth32Float;
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
@@ -301,13 +333,13 @@ impl RenApp {
         });
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create material and pipeline
+        // Create material and pipeline (target HDR format for full precision)
         let mut material = TexturedPbrMaterial::new();
-        material.build_pipeline(&device, &queue, surface_format, depth_format);
+        material.build_pipeline(&device, &queue, hdr_format, depth_format);
 
-        // Create line material and pipeline
+        // Create line material and pipeline (also targets HDR format)
         let mut line_material = LineMaterial::new();
-        line_material.build_pipeline(&device, surface_format, depth_format);
+        line_material.build_pipeline(&device, hdr_format, depth_format);
 
         // Create default textures for meshes without textures
         let white_texture = Texture2D::white(&device, &queue);
@@ -418,27 +450,27 @@ impl RenApp {
             model_bind_group: axes_model_bind_group,
         });
 
-        // Create scene render target for post-processing
+        // Create scene render target for post-processing (HDR format for full precision)
         let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Scene Texture"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
+            format: hdr_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let scene_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create bloom input texture (copy of scene for bloom to read from, also used by DoF)
+        // Create bloom input texture (HDR format for bloom to read from, also used by DoF)
         let bloom_input_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Bloom Input Texture"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
+            format: hdr_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
@@ -478,7 +510,7 @@ impl RenApp {
             soft_threshold: 0.5,
             blur_iterations: 4,
         });
-        bloom.init(&device, surface_format, width, height);
+        bloom.init(&device, hdr_format, width, height);
 
         // Create tonemapping pass
         let mut tonemapping = TonemappingPass::new();
@@ -503,27 +535,27 @@ impl RenApp {
         // Create SSAO pass
         let mut ssao = SsaoPass::new();
         ssao.set_quality(SsaoQuality::Medium);
-        ssao.init(&device, &queue, surface_format, width, height);
+        ssao.init(&device, &queue, hdr_format, width, height);
 
-        // Create SSR pass
+        // Create SSR pass (renders to HDR scene)
         let mut ssr = SsrPass::new();
         ssr.set_enabled(false); // Disabled by default
-        ssr.init(&device, surface_format, width, height);
+        ssr.init(&device, hdr_format, width, height);
 
-        // Create vignette pass
+        // Create vignette pass (post-tonemapping, uses surface format)
         let mut vignette = VignettePass::new();
         vignette.init(&device, surface_format, width, height);
 
-        // Create DoF pass
+        // Create DoF pass (renders to HDR scene)
         let mut dof = DofPass::new();
         dof.set_enabled(false); // Disabled by default
-        dof.init(&device, surface_format, width, height);
+        dof.init(&device, hdr_format, width, height);
 
-        // Create motion blur pass
-        let motion_blur = MotionBlurPass::new(&device, width, height, surface_format);
+        // Create motion blur pass (renders to HDR scene)
+        let motion_blur = MotionBlurPass::new(&device, width, height, hdr_format);
 
-        // Create outline pass
-        let outline = OutlinePass::new(&device, width, height, surface_format);
+        // Create outline pass (renders to HDR scene)
+        let outline = OutlinePass::new(&device, width, height, hdr_format);
 
         // Create color correction pass
         let color_correction = ColorCorrectionPass::new(&device, surface_format);
@@ -618,8 +650,8 @@ impl RenApp {
         });
 
         // ========== Skybox Setup ==========
-        // Create skybox pass (must match scene texture format)
-        let skybox_pass = SkyboxPass::new(&device, surface_format);
+        // Create skybox pass (must match scene texture format - HDR)
+        let skybox_pass = SkyboxPass::new(&device, hdr_format);
 
         // Create default procedural sky cubemap
         let skybox_texture = CubeTexture::default_sky(&device, &queue);
@@ -646,6 +678,21 @@ impl RenApp {
         // ========== BRDF LUT Setup ==========
         // Generate BRDF Look-Up Table for proper IBL split-sum approximation
         let brdf_lut = BrdfLut::new(&device, &queue);
+
+        // ========== Prefiltered Environment Map ==========
+        // Generate prefiltered cubemap for roughness-based IBL specular
+        // Each mip level is convolved for increasing roughness
+        let prefiltered_env_texture = generate_prefiltered_sky(&device, &queue, 64, 5);
+        let prefiltered_env_view = prefiltered_env_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Prefiltered Env View"),
+            format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(5),
+            base_array_layer: 0,
+            array_layer_count: Some(6),
+        });
 
         // Create shadow uniform buffer
         let shadow_uniform = WebShadowUniform::default();
@@ -778,6 +825,7 @@ impl RenApp {
         });
 
         Ok(RenApp {
+            adapter,
             device,
             queue,
             surface,
@@ -825,6 +873,11 @@ impl RenApp {
             color_correction,
             aa_mode: AaMode::Fxaa,
             surface_format,
+            hdr_format,
+            // HDR display support
+            hdr_display_available: has_hdr_display,
+            hdr_display_format,
+            hdr_output_enabled: false,
             // Hemisphere light defaults
             hemisphere_enabled: false,
             hemisphere_sky_color: [0.6, 0.75, 1.0],
@@ -865,6 +918,8 @@ impl RenApp {
             skybox_bind_group,
             skybox_sampler,
             skybox_enabled: true,
+            prefiltered_env_texture,
+            prefiltered_env_view,
             brdf_lut,
         })
     }
@@ -1519,27 +1574,27 @@ impl RenApp {
             });
             self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Recreate scene texture for post-processing
+            // Recreate scene texture for post-processing (HDR format)
             self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Scene Texture"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
+                format: self.hdr_format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.scene_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Recreate bloom input texture
+            // Recreate bloom input texture (HDR format)
             self.bloom_input_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Bloom Input Texture"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
+                format: self.hdr_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
@@ -1848,7 +1903,7 @@ impl RenApp {
                     &self.shadow_sampler,
                     &self.shadow_cube_map_view,
                     &self.shadow_cube_sampler,
-                    self.skybox_texture.view(),
+                    &self.prefiltered_env_view,  // Use prefiltered env map for IBL
                     &self.skybox_sampler,
                     self.brdf_lut.view(),
                     self.brdf_lut.sampler(),
@@ -2429,6 +2484,113 @@ impl RenApp {
         self.hemisphere_intensity
     }
 
+    // ========== HDR Display ==========
+
+    /// Check if the display supports HDR output (10-bit or 16-bit float).
+    #[wasm_bindgen]
+    pub fn has_hdr_display(&self) -> bool {
+        self.hdr_display_available
+    }
+
+    /// Get the HDR display format as a string (e.g., "Rgba10a2Unorm", "Rgba16Float").
+    #[wasm_bindgen]
+    pub fn get_hdr_display_format(&self) -> Option<String> {
+        self.hdr_display_format.map(|f| format!("{:?}", f))
+    }
+
+    /// Check if HDR output is currently enabled.
+    #[wasm_bindgen]
+    pub fn is_hdr_output_enabled(&self) -> bool {
+        self.hdr_output_enabled
+    }
+
+    /// Enable or disable HDR output.
+    /// When enabled, uses 10-bit or 16-bit float output with adjusted tonemapping.
+    /// Returns false if HDR display is not available.
+    #[wasm_bindgen]
+    pub fn set_hdr_output_enabled(&mut self, enabled: bool) -> bool {
+        if enabled && !self.hdr_display_available {
+            return false;
+        }
+
+        if enabled == self.hdr_output_enabled {
+            return true;
+        }
+
+        self.hdr_output_enabled = enabled;
+
+        // Reconfigure surface with appropriate format
+        let new_format = if enabled {
+            self.hdr_display_format.unwrap_or(self.surface_format)
+        } else {
+            // Find sRGB format from capabilities
+            let caps = self.surface.get_capabilities(&self.adapter);
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or(caps.formats[0])
+        };
+
+        self.surface_format = new_format;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: new_format,
+            width: self.width,
+            height: self.height,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        self.surface.configure(&self.device, &config);
+
+        // Reinitialize post-tonemapping passes with new format
+        self.tonemapping.init(&self.device, new_format);
+        self.fxaa.init(&self.device, new_format, self.width, self.height);
+        self.smaa.init(&self.device, new_format, self.width, self.height);
+        self.taa.init(&self.device, new_format, self.width, self.height);
+        self.vignette.init(&self.device, new_format, self.width, self.height);
+
+        // Recreate tonemapped and vignette textures with new format
+        self.tonemapped_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Tonemapped Texture"),
+            size: wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: new_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.tonemapped_view = self.tonemapped_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.vignette_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Vignette Texture"),
+            size: wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: new_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.vignette_view = self.vignette_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Adjust tonemapping for HDR output
+        if enabled {
+            // For HDR displays, use a gentler curve that preserves more dynamic range
+            self.tonemapping.set_mode(TonemappingMode::AgX);
+        } else {
+            // Standard SDR settings
+            self.tonemapping.set_mode(TonemappingMode::Aces);
+        }
+
+        true
+    }
+
     // ========== Skybox ==========
 
     /// Enable or disable skybox.
@@ -2469,6 +2631,85 @@ impl RenApp {
             self.skybox_texture.view(),
             &self.skybox_sampler,
         );
+    }
+
+    /// Load an HDR or EXR environment map from bytes.
+    /// Converts equirectangular panorama to cubemap and generates prefiltered mips for IBL.
+    #[wasm_bindgen]
+    pub fn set_skybox_hdr(&mut self, data: &[u8]) -> Result<(), JsValue> {
+        use crate::loaders::{HdrImage, create_prefiltered_hdr_cubemap};
+
+        // Parse HDR/EXR image
+        let hdr = HdrImage::from_bytes(data)
+            .map_err(|e| JsValue::from_str(&format!("Failed to load HDR: {}", e)))?;
+
+        let face_size = 256u32; // Good balance of quality and performance
+        let mip_levels = 6u32;
+
+        // Create prefiltered cubemap for both skybox and IBL
+        self.prefiltered_env_texture = create_prefiltered_hdr_cubemap(
+            &self.device,
+            &self.queue,
+            &hdr,
+            face_size,
+            mip_levels,
+        );
+
+        self.prefiltered_env_view = self.prefiltered_env_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
+        // Also update the skybox texture for rendering the background
+        let skybox_faces = hdr.to_cubemap_faces_ldr(face_size, 1.0);
+        self.skybox_texture = CubeTexture::from_faces_owned(&self.device, &self.queue, &skybox_faces, face_size);
+
+        // Update skybox bind group
+        self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
+            &self.device,
+            self.skybox_texture.view(),
+            &self.skybox_sampler,
+        );
+
+        Ok(())
+    }
+
+    /// Load an HDR or EXR environment map from bytes with custom settings.
+    #[wasm_bindgen]
+    pub fn set_skybox_hdr_with_options(&mut self, data: &[u8], face_size: u32, exposure: f32) -> Result<(), JsValue> {
+        use crate::loaders::{HdrImage, create_prefiltered_hdr_cubemap};
+
+        let hdr = HdrImage::from_bytes(data)
+            .map_err(|e| JsValue::from_str(&format!("Failed to load HDR: {}", e)))?;
+
+        let mip_levels = (face_size as f32).log2().floor() as u32 + 1;
+        let mip_levels = mip_levels.min(8).max(1);
+
+        // Create prefiltered cubemap for IBL
+        self.prefiltered_env_texture = create_prefiltered_hdr_cubemap(
+            &self.device,
+            &self.queue,
+            &hdr,
+            face_size,
+            mip_levels,
+        );
+
+        self.prefiltered_env_view = self.prefiltered_env_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
+        // Create skybox with custom exposure
+        let skybox_faces = hdr.to_cubemap_faces_ldr(face_size, exposure);
+        self.skybox_texture = CubeTexture::from_faces_owned(&self.device, &self.queue, &skybox_faces, face_size);
+
+        self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
+            &self.device,
+            self.skybox_texture.view(),
+            &self.skybox_sampler,
+        );
+
+        Ok(())
     }
 
     // ========== Shadows ==========
@@ -2832,7 +3073,7 @@ impl RenApp {
                 &self.shadow_sampler,
                 &self.shadow_cube_map_view,
                 &self.shadow_cube_sampler,
-                self.skybox_texture.view(),
+                &self.prefiltered_env_view,  // Use prefiltered env map for IBL
                 &self.skybox_sampler,
                 self.brdf_lut.view(),
                 self.brdf_lut.sampler(),

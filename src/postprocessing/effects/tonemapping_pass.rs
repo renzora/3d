@@ -455,6 +455,19 @@ fn adjust_contrast(color: vec3<f32>, contrast: f32) -> vec3<f32> {
     return (color - 0.5) * contrast + 0.5;
 }
 
+// Interleaved gradient noise for dithering (avoids banding artifacts)
+fn interleaved_gradient_noise(pos: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pos, magic.xy)));
+}
+
+// Apply dithering to break up color banding
+fn dither(color: vec3<f32>, pos: vec2<f32>) -> vec3<f32> {
+    // Noise in range [-0.5/255, 0.5/255] to randomize quantization
+    let noise = (interleaved_gradient_noise(pos) - 0.5) / 255.0;
+    return color + vec3<f32>(noise);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = textureSample(input_texture, input_sampler, in.uv).rgb;
@@ -495,6 +508,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Apply gamma correction
     color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / params.gamma));
+
+    // Apply dithering to break up banding (before 8-bit quantization)
+    color = dither(color, in.position.xy);
 
     return vec4<f32>(color, 1.0);
 }

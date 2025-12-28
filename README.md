@@ -633,10 +633,10 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 ### 14.5.1 Pre-filtered Environment Maps (`src/ibl/`)
 | File | Description | Status |
 |------|-------------|--------|
-| `prefilter_generator.rs` | Generate pre-convolved env maps with importance sampling | |
-| `mipmap_roughness.rs` | Each mip level = different roughness response | |
-| `hdr_loader.rs` | Load HDR/EXR environment maps | |
-| `cubemap_converter.rs` | Convert equirect to cubemap with HDR support | |
+| `prefilter.rs` | Generate pre-convolved env maps with GGX importance sampling | ✅ |
+| `mipmap_roughness.rs` | Each mip level = different roughness response | ✅ (in prefilter.rs) |
+| `hdr_loader.rs` | Load HDR/EXR environment maps | ✅ (in loaders/) |
+| `cubemap_converter.rs` | Convert equirect to cubemap with HDR support | ✅ (in hdr_loader.rs) |
 | `irradiance_map.rs` | Diffuse irradiance convolution | |
 
 ### 14.5.2 BRDF Look-Up Table (`src/texture/`)
@@ -720,13 +720,37 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 - Used in pbr_textured.wgsl split-sum approximation
 ```
 
-**Pre-filtered Environment**
+**Pre-filtered Environment Maps ✅ IMPLEMENTED**
 ```
-- 6-8 mip levels
+- 6 mip levels (64x64 base, configurable)
 - Mip 0 = mirror reflection (roughness 0)
 - Higher mips = blurrier (higher roughness)
-- Importance-sampled GGX during bake
-- Requires HDR source for quality
+- GGX importance sampling with Hammersley sequence
+- Procedural sky or HDR/EXR file input
+- src/ibl/prefilter.rs - CPU-side convolution
+```
+
+**HDR/EXR Skybox Loading ✅ IMPLEMENTED**
+```
+- Supports Radiance HDR (.hdr) and OpenEXR (.exr) formats
+- Equirectangular to cubemap conversion
+- Automatic prefiltering for IBL
+- ACES tonemapping for LDR display
+- src/loaders/hdr_loader.rs
+```
+
+**HDR Display Output ✅ IMPLEMENTED**
+```
+- Auto-detects HDR display capability
+- Supports Rgba16Float (16-bit) and Rgb10a2Unorm (10-bit)
+- Runtime toggle between SDR and HDR output
+- Automatic tonemapping adjustment (AgX for HDR, ACES for SDR)
+- Full 16-bit float render pipeline (no banding)
+- Dithering in tonemapping shader for 8-bit output
+API:
+  app.has_hdr_display()           // Check availability
+  app.get_hdr_display_format()    // "Rgba16Float" or "Rgb10a2Unorm"
+  app.set_hdr_output_enabled(true) // Enable HDR output
 ```
 
 **Spherical Harmonics**
@@ -747,16 +771,18 @@ This phase focuses on achieving Sketchfab-level rendering quality through proper
 
 ### Priority Order for Realism
 
-| Priority | Feature | Impact | Effort |
-|----------|---------|--------|--------|
-| 1 | Pre-filtered Environment Maps | High | Medium |
-| 2 | Irradiance Map (diffuse IBL) | High | Medium |
-| 3 | PCSS Soft Shadows | Medium | Low |
-| 4 | Contact Shadows | Medium | Low |
-| 5 | GTAO | Medium | Medium |
-| 6 | Spherical Harmonics | Medium | Medium |
-| 7 | Clustered Forward | High (many lights) | High |
-| 8 | Auto Exposure | Low | Low |
+| Priority | Feature | Impact | Effort | Status |
+|----------|---------|--------|--------|--------|
+| 1 | Pre-filtered Environment Maps | High | Medium | ✅ Done |
+| 2 | HDR Display Output (10-bit/16-bit) | High | Medium | ✅ Done |
+| 3 | HDR/EXR Skybox Loading | High | Medium | ✅ Done |
+| 4 | Irradiance Map (diffuse IBL) | High | Medium | |
+| 5 | PCSS Soft Shadows | Medium | Low | |
+| 6 | Contact Shadows | Medium | Low | |
+| 7 | GTAO | Medium | Medium | |
+| 8 | Spherical Harmonics | Medium | Medium | |
+| 9 | Clustered Forward | High (many lights) | High | |
+| 10 | Auto Exposure | Low | Low | |
 
 ---
 
