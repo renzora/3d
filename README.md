@@ -172,8 +172,13 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 ### 3.2 Shader System (`src/shaders/`)
 | File | Description | Status |
 |------|-------------|--------|
+| `basic.wgsl` | Basic unlit shader | ✅ |
 | `standard.wgsl` | Standard lighting shader | ✅ |
 | `pbr.wgsl` | PBR metallic-roughness shader | ✅ |
+| `pbr_textured.wgsl` | Full PBR with IBL, shadows, debug modes | ✅ |
+| `pbr_lit.wgsl` | PBR with lighting | ✅ |
+| `line.wgsl` | Line rendering shader | ✅ |
+| `skybox.wgsl` | Skybox shader | ✅ |
 | `shader_lib.rs` | Shader chunk library | |
 | `shader_chunk.rs` | Reusable shader snippets | |
 | `uniform_lib.rs` | Common uniform definitions | |
@@ -191,6 +196,7 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `sampler.rs` | Texture sampling parameters | ✅ |
 | `texture3d.rs` | 3D/volume texture | |
 | `cube_texture.rs` | Cubemap texture | ✅ |
+| `brdf_lut.rs` | BRDF integration LUT for IBL | ✅ |
 | `data_texture.rs` | Texture from raw data | |
 | `compressed_texture.rs` | GPU compressed formats | |
 | `video_texture.rs` | Video as texture | |
@@ -198,13 +204,13 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `render_target_texture.rs` | Render-to-texture | |
 
 ### 4.2 Loaders (`src/loaders/`)
-| File | Description |
-|------|-------------|
-| `image_loader.rs` | PNG/JPG/WebP loading |
-| `texture_loader.rs` | Texture from URL |
-| `cube_texture_loader.rs` | Cubemap loading |
-| `hdr_loader.rs` | HDRI environment maps |
-| `ktx2_loader.rs` | KTX2 compressed textures |
+| File | Description | Status |
+|------|-------------|--------|
+| `image_loader.rs` | PNG/JPG/WebP loading | |
+| `texture_loader.rs` | Texture from URL | |
+| `cube_texture_loader.rs` | Cubemap loading | |
+| `hdr_loader.rs` | HDRI environment maps | ✅ |
+| `ktx2_loader.rs` | KTX2 compressed textures | |
 
 ---
 
@@ -225,13 +231,13 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | File | Description | Status |
 |------|-------------|--------|
 | `mod.rs` | Shadow config, PCF modes | ✅ |
-| `shadow_config.rs` | Shadow quality settings | ✅ |
+| `shadow_config.rs` | Shadow quality settings, PCSS config | ✅ |
 | `shadow_map.rs` | Shadow map texture management | ✅ |
-| `directional_shadow.rs` | Directional light shadows | ✅ |
-| `pcf_shadow.rs` | PCF shadow filtering (3x3) | ✅ |
-| `spot_shadow.rs` | Perspective shadow map | ✅ |
+| `shadow_pass.rs` | Shadow rendering pass | ✅ |
 | `point_shadow.rs` | Omnidirectional shadow (cubemap) | ✅ |
 | `cascade.rs` | Cascaded shadow maps | ✅ (infrastructure) |
+| Contact shadows | Screen-space ray marching | ✅ (in pbr_textured.wgsl) |
+| PCSS | Percentage-Closer Soft Shadows | ✅ (in pbr_textured.wgsl) |
 
 ---
 
@@ -317,8 +323,8 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 |------|-------------|--------|
 | `loader.rs` | Base loader trait | ✅ |
 | `loading_manager.rs` | Load progress tracking | ✅ |
-| `gltf_loader.rs` | GLTF/GLB models | ✅ |
-| `gltf_parser.rs` | GLTF JSON parsing | ✅ |
+| `gltf_loader.rs` | GLTF/GLB models with textures | ✅ |
+| `hdr_loader.rs` | HDR/EXR environment maps | ✅ |
 | `obj_loader.rs` | Wavefront OBJ | ✅ |
 | `draco_loader.rs` | Draco mesh compression | |
 
@@ -351,6 +357,9 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `tonemapping_pass.rs` | HDR tonemapping | ✅ |
 | `color_correction_pass.rs` | Brightness/contrast/gamma | ✅ |
 | `vignette_pass.rs` | Vignette effect | ✅ |
+| `gtao_pass.rs` | Ground Truth AO | ✅ |
+| `lumen_pass.rs` | Screen-space Global Illumination | ✅ |
+| `skybox_pass.rs` | Skybox rendering | ✅ |
 
 ---
 
@@ -501,9 +510,19 @@ Nanite is NOT a separate renderer. It's a geometry pipeline that feeds into the 
 
 ---
 
-## Phase 13: Lumen - Global Illumination
+## Phase 13: Lumen - Global Illumination ✅ (SSGI Implemented)
 
-### Architecture
+### Current Implementation
+
+Screen-Space Global Illumination (SSGI) is fully implemented with:
+- **SSGI Pass**: Cosine-weighted hemisphere ray tracing (4-16 rays based on quality)
+- **Denoise Pass**: Edge-aware bilateral blur (5x5 kernel) with depth/normal weighting
+- **Temporal Pass**: 95% history blend with disocclusion detection and neighborhood clamping
+- **Composite Pass**: Adds GI to scene with intensity control
+
+Quality presets: Low (4 rays), Medium (8 rays), High (12 rays), Ultra (16 rays)
+
+### Architecture (Full Lumen - Future)
 
 Lumen provides global illumination through a hybrid approach: screen-space for nearby, SDF tracing for far-field.
 
@@ -606,6 +625,20 @@ Lumen provides global illumination through a hybrid approach: screen-space for n
 
 ## Phase 14: Advanced Rendering
 
+### 14.0 Debug Visualization / Render Modes ✅
+| Mode | Description | Status |
+|------|-------------|--------|
+| Lit | Full PBR lighting | ✅ |
+| Unlit | Base color with simple lighting | ✅ |
+| Normals | World-space normal visualization | ✅ |
+| Depth | Linear depth visualization | ✅ |
+| Metallic | Metallic factor visualization | ✅ |
+| Roughness | Roughness factor visualization | ✅ |
+| AO | Ambient occlusion visualization | ✅ |
+| UVs | UV coordinate visualization | ✅ |
+| Flat | Clay/matte shading | ✅ |
+| Wireframe | True wireframe (barycentric coords) | ✅ |
+
 ### 14.1 Rendering Pipelines (`src/renderers/`)
 | File | Description |
 |------|-------------|
@@ -616,13 +649,13 @@ Lumen provides global illumination through a hybrid approach: screen-space for n
 | `g_buffer.rs` | G-Buffer management |
 
 ### 14.2 Environment (`src/environment/`)
-| File | Description |
-|------|-------------|
-| `environment_map.rs` | Environment cubemap |
-| `pmrem_generator.rs` | Prefiltered mipmap env |
-| `spherical_harmonics.rs` | SH for irradiance |
+| File | Description | Status |
+|------|-------------|--------|
+| `environment_map.rs` | Environment cubemap | |
+| `pmrem_generator.rs` | Prefiltered mipmap env | ✅ (in ibl/prefilter.rs) |
+| `spherical_harmonics.rs` | SH for irradiance | |
 | `skybox.rs` | Skybox rendering | ✅ |
-| `procedural_sky.rs` | Procedural sky |
+| `procedural_sky.rs` | Procedural sky | |
 
 ---
 
@@ -630,14 +663,14 @@ Lumen provides global illumination through a hybrid approach: screen-space for n
 
 This phase focuses on achieving Sketchfab-level rendering quality through proper IBL implementation and PBR enhancements.
 
-### 14.5.1 Pre-filtered Environment Maps (`src/ibl/`)
+### 14.5.1 Pre-filtered Environment Maps (`src/ibl/`) ✅
 | File | Description | Status |
 |------|-------------|--------|
+| `mod.rs` | IBL module exports | ✅ |
 | `prefilter.rs` | Generate pre-convolved env maps with GGX importance sampling | ✅ |
-| `mipmap_roughness.rs` | Each mip level = different roughness response | ✅ (in prefilter.rs) |
-| `hdr_loader.rs` | Load HDR/EXR environment maps | ✅ (in loaders/) |
-| `cubemap_converter.rs` | Convert equirect to cubemap with HDR support | ✅ (in hdr_loader.rs) |
 | `irradiance.rs` | Diffuse irradiance convolution | ✅ |
+| HDR loader | Load HDR/EXR environment maps | ✅ (in loaders/hdr_loader.rs) |
+| Cubemap converter | Convert equirect to cubemap with HDR support | ✅ (in hdr_loader.rs) |
 
 ### 14.5.2 BRDF Look-Up Table (`src/texture/`)
 | File | Description | Status |
@@ -997,17 +1030,17 @@ All Rust modules mirrored with TypeScript classes.
 Phase 1   ████████████████████  Foundation ✅
 Phase 2   ████████████████████  Geometry ✅
 Phase 3   ████████████████████  Materials ✅
-Phase 4   ██████████████████    Textures ✅
-Phase 5   ██████████████████    Lighting ✅
-Phase 6   ████████████████      Cameras ✅
-Phase 7   ████████████████      Objects
+Phase 4   ████████████████████  Textures ✅
+Phase 5   ████████████████████  Lighting ✅
+Phase 6   ████████████████████  Cameras ✅
+Phase 7   ████████████████      Objects ✅ (partial)
+Phase 8   ████████████████████  Animation ✅
+Phase 9   ████████████████████  Loaders ✅
+Phase 10  ████████████████████  Post-Process ✅
 Phase 11  ████████████████████  SharedArrayBuffer (enables parallelism)
-Phase 8   ██████████████        Animation
-Phase 9   ██████████████        Loaders
-Phase 10  ████████████          Post-Process
 Phase 12  ████████████████      Nanite (core differentiator)
-Phase 13  ████████████████      Lumen (core differentiator)
-Phase 14  ████████████          Advanced Render
+Phase 13  ████████████████████  Lumen ✅ (SSGI implemented)
+Phase 14  ████████████████      Advanced Render ✅ (partial - IBL, shadows, debug modes)
 Phase 15  ██████████            Optimization
 Phase 16  ████████              Physics
 Phase 17  ██████                Audio
