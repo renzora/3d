@@ -1,4 +1,4 @@
-//! Depth of Field post-processing effect.
+//! Depth of Field post-processing effect with circular bokeh.
 
 use crate::postprocessing::pass::{Pass, FullscreenVertex, FULLSCREEN_QUAD_VERTICES};
 use wgpu::util::DeviceExt;
@@ -6,13 +6,27 @@ use wgpu::util::DeviceExt;
 /// Depth of Field quality presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DofQuality {
-    /// Low quality - 5 samples per direction.
+    /// Low quality - 22 samples (3 rings).
     Low,
-    /// Medium quality - 9 samples per direction.
+    /// Medium quality - 43 samples (5 rings).
     #[default]
     Medium,
-    /// High quality - 13 samples per direction.
+    /// High quality - 71 samples (7 rings).
     High,
+    /// Ultra quality - 106 samples (9 rings).
+    Ultra,
+}
+
+impl DofQuality {
+    /// Get the number of sample rings for this quality level.
+    pub fn ring_count(&self) -> u32 {
+        match self {
+            DofQuality::Low => 3,
+            DofQuality::Medium => 5,
+            DofQuality::High => 7,
+            DofQuality::Ultra => 9,
+        }
+    }
 }
 
 /// Depth of Field settings.
@@ -22,12 +36,16 @@ pub struct DofSettings {
     pub focal_distance: f32,
     /// Range around focal distance that stays sharp.
     pub focal_range: f32,
-    /// Maximum blur strength.
+    /// Maximum blur strength (affects bokeh size).
     pub blur_strength: f32,
     /// Enable near blur (objects closer than focal plane).
     pub near_blur: bool,
     /// Enable far blur (objects further than focal plane).
     pub far_blur: bool,
+    /// Bokeh brightness boost (makes highlights pop).
+    pub highlight_boost: f32,
+    /// Highlight threshold (luminance above this gets boosted).
+    pub highlight_threshold: f32,
 }
 
 impl Default for DofSettings {
@@ -38,6 +56,8 @@ impl Default for DofSettings {
             blur_strength: 1.0,
             near_blur: true,
             far_blur: true,
+            highlight_boost: 0.5,
+            highlight_threshold: 0.5,
         }
     }
 }
@@ -46,15 +66,17 @@ impl Default for DofSettings {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DofUniform {
-    /// focal_distance, focal_range, blur_strength, sample_count
+    /// focal_distance, focal_range, blur_strength, ring_count
     params: [f32; 4],
     /// near_blur, far_blur, near, far
     params2: [f32; 4],
     /// 1/width, 1/height, width, height
     resolution: [f32; 4],
+    /// highlight_boost, highlight_threshold, aspect_ratio, max_coc_pixels
+    params3: [f32; 4],
 }
 
-/// Depth of Field post-processing pass.
+/// Depth of Field post-processing pass with circular bokeh.
 pub struct DofPass {
     enabled: bool,
     settings: DofSettings,
@@ -63,17 +85,19 @@ pub struct DofPass {
     height: u32,
     near: f32,
     far: f32,
+    output_format: wgpu::TextureFormat,
     // GPU resources
-    blur_h_pipeline: Option<wgpu::RenderPipeline>,
-    blur_v_pipeline: Option<wgpu::RenderPipeline>,
+    coc_pipeline: Option<wgpu::RenderPipeline>,
+    bokeh_pipeline: Option<wgpu::RenderPipeline>,
     bind_group_layout: Option<wgpu::BindGroupLayout>,
+    bokeh_bind_group_layout: Option<wgpu::BindGroupLayout>,
     uniform_buffer: Option<wgpu::Buffer>,
     quad_buffer: Option<wgpu::Buffer>,
     sampler: Option<wgpu::Sampler>,
     point_sampler: Option<wgpu::Sampler>,
-    // Intermediate texture for two-pass blur
-    blur_texture: Option<wgpu::Texture>,
-    blur_view: Option<wgpu::TextureView>,
+    // CoC texture (stores CoC in alpha, color in RGB)
+    coc_texture: Option<wgpu::Texture>,
+    coc_view: Option<wgpu::TextureView>,
 }
 
 impl DofPass {
@@ -87,15 +111,17 @@ impl DofPass {
             height: 1,
             near: 0.1,
             far: 100.0,
-            blur_h_pipeline: None,
-            blur_v_pipeline: None,
+            output_format: wgpu::TextureFormat::Bgra8Unorm,
+            coc_pipeline: None,
+            bokeh_pipeline: None,
             bind_group_layout: None,
+            bokeh_bind_group_layout: None,
             uniform_buffer: None,
             quad_buffer: None,
             sampler: None,
             point_sampler: None,
-            blur_texture: None,
-            blur_view: None,
+            coc_texture: None,
+            coc_view: None,
         }
     }
 
@@ -135,18 +161,22 @@ impl DofPass {
         self.far = far;
     }
 
-    fn sample_count(&self) -> u32 {
-        match self.quality {
-            DofQuality::Low => 5,
-            DofQuality::Medium => 9,
-            DofQuality::High => 13,
-        }
+    /// Set bokeh highlight boost (makes bright spots pop more).
+    pub fn set_highlight_boost(&mut self, boost: f32) {
+        self.settings.highlight_boost = boost.clamp(0.0, 2.0);
+    }
+
+    /// Set bokeh highlight threshold (luminance above this gets boosted).
+    pub fn set_highlight_threshold(&mut self, threshold: f32) {
+        self.settings.highlight_threshold = threshold.clamp(0.0, 1.0);
     }
 
     /// Initialize GPU resources.
-    pub fn init(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) {
+    /// The format parameter is the output format (typically surface format like Bgra8Unorm).
+    pub fn init(&mut self, device: &wgpu::Device, output_format: wgpu::TextureFormat, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        self.output_format = output_format;
 
         // Create samplers
         self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
@@ -169,9 +199,9 @@ impl DofPass {
             ..Default::default()
         }));
 
-        // Create bind group layout
+        // Create bind group layout for CoC pass
         self.bind_group_layout = Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("DoF Bind Group Layout"),
+            label: Some("DoF CoC Bind Group Layout"),
             entries: &[
                 // Scene texture
                 wgpu::BindGroupLayoutEntry {
@@ -223,22 +253,44 @@ impl DofPass {
             ],
         }));
 
+        // Create bind group layout for bokeh pass (uses CoC texture instead of depth)
+        self.bokeh_bind_group_layout = Some(device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DoF Bokeh Bind Group Layout"),
+            entries: &[
+                // CoC texture (RGB = color, A = CoC)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Linear sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        }));
+
         // Create uniform buffer
-        let uniform = DofUniform {
-            params: [
-                self.settings.focal_distance,
-                self.settings.focal_range,
-                self.settings.blur_strength,
-                self.sample_count() as f32,
-            ],
-            params2: [
-                if self.settings.near_blur { 1.0 } else { 0.0 },
-                if self.settings.far_blur { 1.0 } else { 0.0 },
-                self.near,
-                self.far,
-            ],
-            resolution: [1.0 / width as f32, 1.0 / height as f32, width as f32, height as f32],
-        };
+        let uniform = self.create_uniform();
         self.uniform_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("DoF Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniform]),
@@ -252,16 +304,44 @@ impl DofPass {
             usage: wgpu::BufferUsages::VERTEX,
         }));
 
-        // Create intermediate blur texture
-        self.create_textures(device, format);
+        // Create CoC texture (RGBA16F to store color + CoC)
+        self.create_textures(device);
 
-        // Create pipelines
-        self.create_pipelines(device, format);
+        // Create pipelines (bokeh outputs to output_format)
+        self.create_pipelines(device);
     }
 
-    fn create_textures(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        let blur_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("DoF Blur Texture"),
+    fn create_uniform(&self) -> DofUniform {
+        let aspect = self.width as f32 / self.height as f32;
+        let max_coc_pixels = self.settings.blur_strength * 40.0; // Max CoC in pixels
+
+        DofUniform {
+            params: [
+                self.settings.focal_distance,
+                self.settings.focal_range,
+                self.settings.blur_strength,
+                self.quality.ring_count() as f32,
+            ],
+            params2: [
+                if self.settings.near_blur { 1.0 } else { 0.0 },
+                if self.settings.far_blur { 1.0 } else { 0.0 },
+                self.near,
+                self.far,
+            ],
+            resolution: [1.0 / self.width as f32, 1.0 / self.height as f32, self.width as f32, self.height as f32],
+            params3: [
+                self.settings.highlight_boost,
+                self.settings.highlight_threshold,
+                aspect,
+                max_coc_pixels,
+            ],
+        }
+    }
+
+    fn create_textures(&mut self, device: &wgpu::Device) {
+        // Use RGBA16Float for CoC texture to store HDR color + CoC
+        let coc_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DoF CoC Texture"),
             size: wgpu::Extent3d {
                 width: self.width,
                 height: self.height,
@@ -270,41 +350,41 @@ impl DofPass {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        self.blur_view = Some(blur_texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        self.blur_texture = Some(blur_texture);
+        self.coc_view = Some(coc_texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.coc_texture = Some(coc_texture);
     }
 
-    fn create_pipelines(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("DoF Pipeline Layout"),
+    fn create_pipelines(&mut self, device: &wgpu::Device) {
+        // CoC calculation pass
+        let coc_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DoF CoC Pipeline Layout"),
             bind_group_layouts: &[self.bind_group_layout.as_ref().unwrap()],
             push_constant_ranges: &[],
         });
 
-        // Horizontal blur shader
-        let blur_h_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DoF Horizontal Blur Shader"),
-            source: wgpu::ShaderSource::Wgsl(DOF_BLUR_H_SHADER.into()),
+        let coc_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("DoF CoC Shader"),
+            source: wgpu::ShaderSource::Wgsl(DOF_COC_SHADER.into()),
         });
 
-        self.blur_h_pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("DoF Horizontal Blur Pipeline"),
-            layout: Some(&layout),
+        self.coc_pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("DoF CoC Pipeline"),
+            layout: Some(&coc_layout),
             vertex: wgpu::VertexState {
-                module: &blur_h_shader,
+                module: &coc_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[FullscreenVertex::layout()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &blur_h_shader,
+                module: &coc_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -317,26 +397,32 @@ impl DofPass {
             cache: None,
         }));
 
-        // Vertical blur shader
-        let blur_v_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DoF Vertical Blur Shader"),
-            source: wgpu::ShaderSource::Wgsl(DOF_BLUR_V_SHADER.into()),
+        // Bokeh blur pass
+        let bokeh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DoF Bokeh Pipeline Layout"),
+            bind_group_layouts: &[self.bokeh_bind_group_layout.as_ref().unwrap()],
+            push_constant_ranges: &[],
         });
 
-        self.blur_v_pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("DoF Vertical Blur Pipeline"),
-            layout: Some(&layout),
+        let bokeh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("DoF Bokeh Shader"),
+            source: wgpu::ShaderSource::Wgsl(DOF_BOKEH_SHADER.into()),
+        });
+
+        self.bokeh_pipeline = Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("DoF Bokeh Pipeline"),
+            layout: Some(&bokeh_layout),
             vertex: wgpu::VertexState {
-                module: &blur_v_shader,
+                module: &bokeh_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[FullscreenVertex::layout()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &blur_v_shader,
+                module: &bokeh_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: self.output_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -352,21 +438,7 @@ impl DofPass {
 
     fn update_uniforms(&self, queue: &wgpu::Queue) {
         if let Some(ref buffer) = self.uniform_buffer {
-            let uniform = DofUniform {
-                params: [
-                    self.settings.focal_distance,
-                    self.settings.focal_range,
-                    self.settings.blur_strength,
-                    self.sample_count() as f32,
-                ],
-                params2: [
-                    if self.settings.near_blur { 1.0 } else { 0.0 },
-                    if self.settings.far_blur { 1.0 } else { 0.0 },
-                    self.near,
-                    self.far,
-                ],
-                resolution: [1.0 / self.width as f32, 1.0 / self.height as f32, self.width as f32, self.height as f32],
-            };
+            let uniform = self.create_uniform();
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[uniform]));
         }
     }
@@ -382,26 +454,25 @@ impl DofPass {
         queue: &wgpu::Queue,
     ) {
         if !self.enabled {
-            // Just blit input to output
-            self.blit(encoder, input, output, device, queue);
             return;
         }
 
-        let Some(ref blur_h_pipeline) = self.blur_h_pipeline else { return };
-        let Some(ref blur_v_pipeline) = self.blur_v_pipeline else { return };
+        let Some(ref coc_pipeline) = self.coc_pipeline else { return };
+        let Some(ref bokeh_pipeline) = self.bokeh_pipeline else { return };
         let Some(ref bind_group_layout) = self.bind_group_layout else { return };
+        let Some(ref bokeh_bind_group_layout) = self.bokeh_bind_group_layout else { return };
         let Some(ref sampler) = self.sampler else { return };
         let Some(ref point_sampler) = self.point_sampler else { return };
         let Some(ref uniform_buffer) = self.uniform_buffer else { return };
         let Some(ref quad_buffer) = self.quad_buffer else { return };
-        let Some(ref blur_view) = self.blur_view else { return };
+        let Some(ref coc_view) = self.coc_view else { return };
 
         self.update_uniforms(queue);
 
-        // Pass 1: Horizontal blur (input -> blur_texture)
+        // Pass 1: Calculate CoC and store color + CoC
         {
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("DoF Horizontal Bind Group"),
+                label: Some("DoF CoC Bind Group"),
                 layout: bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -428,9 +499,9 @@ impl DofPass {
             });
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("DoF Horizontal Pass"),
+                label: Some("DoF CoC Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: blur_view,
+                    view: coc_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -442,43 +513,35 @@ impl DofPass {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(blur_h_pipeline);
+            pass.set_pipeline(coc_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, quad_buffer.slice(..));
             pass.draw(0..6, 0..1);
         }
 
-        // Pass 2: Vertical blur (blur_texture -> output)
+        // Pass 2: Bokeh blur using disc sampling
         {
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("DoF Vertical Bind Group"),
-                layout: bind_group_layout,
+                label: Some("DoF Bokeh Bind Group"),
+                layout: bokeh_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(blur_view),
+                        resource: wgpu::BindingResource::TextureView(coc_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
                         resource: wgpu::BindingResource::Sampler(sampler),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(point_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
+                        binding: 2,
                         resource: uniform_buffer.as_entire_binding(),
                     },
                 ],
             });
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("DoF Vertical Pass"),
+                label: Some("DoF Bokeh Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output,
                     resolve_target: None,
@@ -492,82 +555,11 @@ impl DofPass {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(blur_v_pipeline);
+            pass.set_pipeline(bokeh_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, quad_buffer.slice(..));
             pass.draw(0..6, 0..1);
         }
-    }
-
-    fn blit(&self, encoder: &mut wgpu::CommandEncoder, input: &wgpu::TextureView, output: &wgpu::TextureView, device: &wgpu::Device, queue: &wgpu::Queue) {
-        // Set blur_strength to 0 to disable effect
-        if let Some(ref buffer) = self.uniform_buffer {
-            let uniform = DofUniform {
-                params: [self.settings.focal_distance, self.settings.focal_range, 0.0, self.sample_count() as f32],
-                params2: [0.0, 0.0, self.near, self.far],
-                resolution: [1.0 / self.width as f32, 1.0 / self.height as f32, self.width as f32, self.height as f32],
-            };
-            queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[uniform]));
-        }
-
-        let Some(ref blur_h_pipeline) = self.blur_h_pipeline else { return };
-        let Some(ref bind_group_layout) = self.bind_group_layout else { return };
-        let Some(ref sampler) = self.sampler else { return };
-        let Some(ref point_sampler) = self.point_sampler else { return };
-        let Some(ref uniform_buffer) = self.uniform_buffer else { return };
-        let Some(ref quad_buffer) = self.quad_buffer else { return };
-        let Some(ref blur_view) = self.blur_view else { return }; // Need a depth view for bind group
-
-        // We need a valid depth texture for the bind group, but since blur_strength is 0,
-        // the shader will just copy. Use blur_view as placeholder (not ideal but works).
-        // In practice, render_with_depth is always called with a real depth view.
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DoF Blit Bind Group"),
-            layout: bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(input),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(blur_view), // Placeholder
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(point_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("DoF Blit Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: output,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-
-        pass.set_pipeline(blur_h_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_vertex_buffer(0, quad_buffer.slice(..));
-        pass.draw(0..6, 0..1);
     }
 }
 
@@ -597,10 +589,9 @@ impl Pass for DofPass {
         self.width = width;
         self.height = height;
 
-        // Recreate blur texture
-        if let Some(ref blur_tex) = self.blur_texture {
-            let format = blur_tex.format();
-            self.create_textures(device, format);
+        // Recreate textures
+        if self.coc_texture.is_some() {
+            self.create_textures(device);
         }
     }
 
@@ -616,8 +607,8 @@ impl Pass for DofPass {
     }
 }
 
-// Shared shader code for both passes
-const DOF_SHADER_COMMON: &str = r#"
+// CoC calculation shader - stores color + CoC
+const DOF_COC_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -629,12 +620,14 @@ struct VertexOutput {
 }
 
 struct Params {
-    // focal_distance, focal_range, blur_strength, sample_count
+    // focal_distance, focal_range, blur_strength, ring_count
     params: vec4<f32>,
     // near_blur, far_blur, near, far
     params2: vec4<f32>,
     // 1/width, 1/height, width, height
     resolution: vec4<f32>,
+    // highlight_boost, highlight_threshold, aspect_ratio, max_coc_pixels
+    params3: vec4<f32>,
 }
 
 @group(0) @binding(0) var scene_texture: texture_2d<f32>;
@@ -656,25 +649,41 @@ fn linearize_depth(d: f32, near: f32, far: f32) -> f32 {
     return near * far / (far - d * (far - near));
 }
 
-// Calculate Circle of Confusion
-fn calc_coc(depth: f32, focal_dist: f32, focal_range: f32, near_blur: f32, far_blur: f32) -> f32 {
-    let diff = depth - focal_dist;
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let focal_dist = params.params.x;
+    let focal_range = params.params.y;
+    let near_blur = params.params2.x;
+    let far_blur = params.params2.y;
+    let near = params.params2.z;
+    let far = params.params2.w;
 
-    // Calculate blur amount based on distance from focal plane
+    // Sample color and depth
+    let color = textureSampleLevel(scene_texture, linear_sampler, in.uv, 0.0).rgb;
+    let depth_raw = textureSampleLevel(depth_texture, point_sampler, in.uv, 0);
+    let depth = linearize_depth(depth_raw, near, far);
+
+    // Calculate signed CoC (negative = near, positive = far)
+    let diff = depth - focal_dist;
     var coc: f32;
+
     if (diff < 0.0) {
-        // Near blur
+        // Near field
         coc = -diff / focal_range * near_blur;
+        coc = -clamp(coc, 0.0, 1.0); // Negative for near
     } else {
-        // Far blur
+        // Far field
         coc = diff / focal_range * far_blur;
+        coc = clamp(coc, 0.0, 1.0); // Positive for far
     }
 
-    return clamp(coc, 0.0, 1.0);
+    // Store color in RGB, signed CoC in alpha
+    return vec4<f32>(color, coc);
 }
 "#;
 
-const DOF_BLUR_H_SHADER: &str = concat!(r#"
+// Bokeh blur shader - disc sampling with brightness weighting
+const DOF_BOKEH_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -686,19 +695,22 @@ struct VertexOutput {
 }
 
 struct Params {
-    // focal_distance, focal_range, blur_strength, sample_count
+    // focal_distance, focal_range, blur_strength, ring_count
     params: vec4<f32>,
     // near_blur, far_blur, near, far
     params2: vec4<f32>,
     // 1/width, 1/height, width, height
     resolution: vec4<f32>,
+    // highlight_boost, highlight_threshold, aspect_ratio, max_coc_pixels
+    params3: vec4<f32>,
 }
 
-@group(0) @binding(0) var scene_texture: texture_2d<f32>;
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
-@group(0) @binding(2) var linear_sampler: sampler;
-@group(0) @binding(3) var point_sampler: sampler;
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(0) var coc_texture: texture_2d<f32>;
+@group(0) @binding(1) var linear_sampler: sampler;
+@group(0) @binding(2) var<uniform> params: Params;
+
+const PI: f32 = 3.14159265359;
+const GOLDEN_ANGLE: f32 = 2.39996323; // PI * (3.0 - sqrt(5.0))
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -708,178 +720,107 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-fn linearize_depth(d: f32, near: f32, far: f32) -> f32 {
-    return near * far / (far - d * (far - near));
-}
-
-fn calc_coc(depth: f32, focal_dist: f32, focal_range: f32, near_blur: f32, far_blur: f32) -> f32 {
-    let diff = depth - focal_dist;
-    var coc: f32;
-    if (diff < 0.0) {
-        coc = -diff / focal_range * near_blur;
-    } else {
-        coc = diff / focal_range * far_blur;
-    }
-    return clamp(coc, 0.0, 1.0);
+// Calculate luminance for brightness weighting
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let focal_dist = params.params.x;
-    let focal_range = params.params.y;
     let blur_strength = params.params.z;
-    let sample_count = i32(params.params.w);
-    let near_blur = params.params2.x;
-    let far_blur = params.params2.y;
-    let near = params.params2.z;
-    let far = params.params2.w;
+    let ring_count = i32(params.params.w);
     let texel_size = params.resolution.xy;
+    let highlight_boost = params.params3.x;
+    let highlight_threshold = params.params3.y;
+    let aspect = params.params3.z;
+    let max_coc_pixels = params.params3.w;
 
-    // Get center color and depth
-    let center_color = textureSampleLevel(scene_texture, linear_sampler, in.uv, 0.0);
-    let center_depth_raw = textureSampleLevel(depth_texture, point_sampler, in.uv, 0);
-    let center_depth = linearize_depth(center_depth_raw, near, far);
-    let center_coc = calc_coc(center_depth, focal_dist, focal_range, near_blur, far_blur);
+    // Get center sample
+    let center = textureSampleLevel(coc_texture, linear_sampler, in.uv, 0.0);
+    let center_color = center.rgb;
+    let center_coc = center.a; // Signed CoC
+    let abs_coc = abs(center_coc);
 
-    // No blur or in focus - return original
-    if (blur_strength <= 0.0 || center_coc < 0.01) {
-        return center_color;
+    // No blur needed if in focus
+    if (abs_coc < 0.01 || blur_strength <= 0.0) {
+        return vec4<f32>(center_color, 1.0);
     }
 
-    // Horizontal blur weighted by CoC
-    var color = vec3<f32>(0.0);
+    // Calculate blur radius in UV space
+    let blur_radius_pixels = abs_coc * max_coc_pixels;
+    let blur_radius = vec2<f32>(
+        blur_radius_pixels * texel_size.x,
+        blur_radius_pixels * texel_size.y * aspect
+    );
+
+    // Accumulate samples using disc pattern
+    var color_sum = vec3<f32>(0.0);
     var weight_sum = 0.0;
-    let blur_radius = center_coc * blur_strength * 10.0;
-    let half_samples = sample_count / 2;
 
-    for (var i = -half_samples; i <= half_samples; i = i + 1) {
-        let offset = vec2<f32>(f32(i) * texel_size.x * blur_radius, 0.0);
-        let sample_uv = in.uv + offset;
+    // Add center sample
+    let center_lum = luminance(center_color);
+    var center_weight = 1.0;
+    if (center_lum > highlight_threshold) {
+        center_weight += (center_lum - highlight_threshold) * highlight_boost;
+    }
+    color_sum += center_color * center_weight;
+    weight_sum += center_weight;
 
-        // Sample color and depth
-        let sample_color = textureSampleLevel(scene_texture, linear_sampler, sample_uv, 0.0).rgb;
-        let sample_depth_raw = textureSampleLevel(depth_texture, point_sampler, sample_uv, 0);
-        let sample_depth = linearize_depth(sample_depth_raw, near, far);
-        let sample_coc = calc_coc(sample_depth, focal_dist, focal_range, near_blur, far_blur);
+    // Sample in concentric rings using golden angle for even distribution
+    var sample_index = 0;
+    for (var ring = 1; ring <= ring_count; ring++) {
+        let ring_radius = f32(ring) / f32(ring_count);
+        let samples_in_ring = ring * 8; // More samples in outer rings
 
-        // Weight by gaussian-like falloff and CoC
-        let dist = abs(f32(i)) / f32(half_samples + 1);
-        let gaussian = exp(-dist * dist * 2.0);
-        let weight = gaussian * max(sample_coc, center_coc * 0.5);
+        for (var s = 0; s < samples_in_ring; s++) {
+            // Golden angle spiral for uniform disc distribution
+            let angle = f32(sample_index) * GOLDEN_ANGLE;
+            let r = ring_radius;
 
-        color += sample_color * weight;
-        weight_sum += weight;
+            let offset = vec2<f32>(
+                cos(angle) * r * blur_radius.x,
+                sin(angle) * r * blur_radius.y
+            );
+
+            let sample_uv = in.uv + offset;
+            let sample_data = textureSampleLevel(coc_texture, linear_sampler, sample_uv, 0.0);
+            let sample_color = sample_data.rgb;
+            let sample_coc = sample_data.a;
+
+            // Weight by sample's CoC - larger CoC means more contribution
+            // Also prevents sharp foreground from bleeding into background
+            let sample_abs_coc = abs(sample_coc);
+            var weight = 1.0;
+
+            // Foreground/background handling:
+            // - If center is background (positive CoC) and sample is foreground (negative CoC),
+            //   only include if sample's CoC is large enough to reach here
+            // - If center is foreground, include all samples
+            if (center_coc > 0.0 && sample_coc < 0.0) {
+                // Background pixel looking at foreground sample
+                // Only include if foreground blur reaches this pixel
+                let reach = sample_abs_coc / abs_coc;
+                weight *= smoothstep(0.0, 1.0, reach);
+            }
+
+            // Brightness weighting for bokeh highlights
+            let lum = luminance(sample_color);
+            if (lum > highlight_threshold) {
+                weight *= 1.0 + (lum - highlight_threshold) * highlight_boost;
+            }
+
+            // CoC-based weighting - larger blur = more contribution
+            weight *= max(sample_abs_coc, abs_coc * 0.5);
+
+            color_sum += sample_color * weight;
+            weight_sum += weight;
+            sample_index++;
+        }
     }
 
-    if (weight_sum > 0.0) {
-        color /= weight_sum;
-    }
+    // Normalize
+    var final_color = color_sum / max(weight_sum, 0.001);
 
-    return vec4<f32>(color, 1.0);
-}
-"#);
-
-const DOF_BLUR_V_SHADER: &str = r#"
-struct VertexInput {
-    @location(0) position: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-}
-
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-struct Params {
-    // focal_distance, focal_range, blur_strength, sample_count
-    params: vec4<f32>,
-    // near_blur, far_blur, near, far
-    params2: vec4<f32>,
-    // 1/width, 1/height, width, height
-    resolution: vec4<f32>,
-}
-
-@group(0) @binding(0) var scene_texture: texture_2d<f32>;
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
-@group(0) @binding(2) var linear_sampler: sampler;
-@group(0) @binding(3) var point_sampler: sampler;
-@group(0) @binding(4) var<uniform> params: Params;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in.position, 0.0, 1.0);
-    out.uv = in.uv;
-    return out;
-}
-
-fn linearize_depth(d: f32, near: f32, far: f32) -> f32 {
-    return near * far / (far - d * (far - near));
-}
-
-fn calc_coc(depth: f32, focal_dist: f32, focal_range: f32, near_blur: f32, far_blur: f32) -> f32 {
-    let diff = depth - focal_dist;
-    var coc: f32;
-    if (diff < 0.0) {
-        coc = -diff / focal_range * near_blur;
-    } else {
-        coc = diff / focal_range * far_blur;
-    }
-    return clamp(coc, 0.0, 1.0);
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let focal_dist = params.params.x;
-    let focal_range = params.params.y;
-    let blur_strength = params.params.z;
-    let sample_count = i32(params.params.w);
-    let near_blur = params.params2.x;
-    let far_blur = params.params2.y;
-    let near = params.params2.z;
-    let far = params.params2.w;
-    let texel_size = params.resolution.xy;
-
-    // Get center color and depth
-    let center_color = textureSampleLevel(scene_texture, linear_sampler, in.uv, 0.0);
-    let center_depth_raw = textureSampleLevel(depth_texture, point_sampler, in.uv, 0);
-    let center_depth = linearize_depth(center_depth_raw, near, far);
-    let center_coc = calc_coc(center_depth, focal_dist, focal_range, near_blur, far_blur);
-
-    // No blur or in focus - return original
-    if (blur_strength <= 0.0 || center_coc < 0.01) {
-        return center_color;
-    }
-
-    // Vertical blur weighted by CoC
-    var color = vec3<f32>(0.0);
-    var weight_sum = 0.0;
-    let blur_radius = center_coc * blur_strength * 10.0;
-    let half_samples = sample_count / 2;
-
-    for (var i = -half_samples; i <= half_samples; i = i + 1) {
-        let offset = vec2<f32>(0.0, f32(i) * texel_size.y * blur_radius);
-        let sample_uv = in.uv + offset;
-
-        // Sample color and depth
-        let sample_color = textureSampleLevel(scene_texture, linear_sampler, sample_uv, 0.0).rgb;
-        let sample_depth_raw = textureSampleLevel(depth_texture, point_sampler, sample_uv, 0);
-        let sample_depth = linearize_depth(sample_depth_raw, near, far);
-        let sample_coc = calc_coc(sample_depth, focal_dist, focal_range, near_blur, far_blur);
-
-        // Weight by gaussian-like falloff and CoC
-        let dist = abs(f32(i)) / f32(half_samples + 1);
-        let gaussian = exp(-dist * dist * 2.0);
-        let weight = gaussian * max(sample_coc, center_coc * 0.5);
-
-        color += sample_color * weight;
-        weight_sum += weight;
-    }
-
-    if (weight_sum > 0.0) {
-        color /= weight_sum;
-    }
-
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(final_color, 1.0);
 }
 "#;

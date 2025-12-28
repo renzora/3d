@@ -527,6 +527,7 @@
                         <option value="0">Low</option>
                         <option value="1" selected>Medium</option>
                         <option value="2">High</option>
+                        <option value="3">Ultra</option>
                     </select>
                 </label>
                 <label>
@@ -543,6 +544,16 @@
                     Blur
                     <input type="range" id="dof-blur-strength" min="0" max="3" step="0.1" value="1">
                     <span class="value" id="dof-blur-strength-val">1.0</span>
+                </label>
+                <label>
+                    Highlight Boost
+                    <input type="range" id="dof-highlight-boost" min="0" max="2" step="0.1" value="0.5">
+                    <span class="value" id="dof-highlight-boost-val">0.5</span>
+                </label>
+                <label>
+                    Highlight Threshold
+                    <input type="range" id="dof-highlight-threshold" min="0" max="1" step="0.05" value="0.5">
+                    <span class="value" id="dof-highlight-threshold-val">0.50</span>
                 </label>
             </div>
             <hr class="divider">
@@ -1366,6 +1377,19 @@
                     const val = parseFloat(e.target.value);
                     app.set_dof_blur_strength(val);
                     document.getElementById('dof-blur-strength-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('dof-highlight-boost').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_dof_highlight_boost) app.set_dof_highlight_boost(val);
+                    document.getElementById('dof-highlight-boost-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+                document.getElementById('dof-highlight-threshold').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_dof_highlight_threshold) app.set_dof_highlight_threshold(val);
+                    document.getElementById('dof-highlight-threshold-val').textContent = val.toFixed(2);
+                    saveSettings();
                 });
 
                 // SSR controls
@@ -1900,6 +1924,8 @@
                         dofFocalDistance: document.getElementById('dof-focal-distance').value,
                         dofFocalRange: document.getElementById('dof-focal-range').value,
                         dofBlurStrength: document.getElementById('dof-blur-strength').value,
+                        dofHighlightBoost: document.getElementById('dof-highlight-boost').value,
+                        dofHighlightThreshold: document.getElementById('dof-highlight-threshold').value,
                         // SSR
                         ssrEnabled: document.getElementById('ssr-enabled').checked,
                         ssrQuality: document.getElementById('ssr-quality').value,
@@ -2010,6 +2036,8 @@
                         setVal('dof-focal-distance', s.dofFocalDistance, 'dof-focal-distance-val');
                         setVal('dof-focal-range', s.dofFocalRange, 'dof-focal-range-val');
                         setVal('dof-blur-strength', s.dofBlurStrength, 'dof-blur-strength-val');
+                        setVal('dof-highlight-boost', s.dofHighlightBoost, 'dof-highlight-boost-val');
+                        setVal('dof-highlight-threshold', s.dofHighlightThreshold, 'dof-highlight-threshold-val');
                         setVal('ssr-enabled', s.ssrEnabled);
                         setVal('ssr-quality', s.ssrQuality);
                         setVal('ssr-max-distance', s.ssrMaxDistance, 'ssr-max-distance-val');
@@ -2094,6 +2122,8 @@
                     app.set_dof_focal_distance(parseFloat(document.getElementById('dof-focal-distance').value));
                     app.set_dof_focal_range(parseFloat(document.getElementById('dof-focal-range').value));
                     app.set_dof_blur_strength(parseFloat(document.getElementById('dof-blur-strength').value));
+                    if (app.set_dof_highlight_boost) app.set_dof_highlight_boost(parseFloat(document.getElementById('dof-highlight-boost').value));
+                    if (app.set_dof_highlight_threshold) app.set_dof_highlight_threshold(parseFloat(document.getElementById('dof-highlight-threshold').value));
                     app.set_ssr_enabled(document.getElementById('ssr-enabled').checked);
                     app.set_ssr_quality(parseInt(document.getElementById('ssr-quality').value));
                     app.set_ssr_max_distance(parseFloat(document.getElementById('ssr-max-distance').value));

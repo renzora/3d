@@ -586,10 +586,10 @@ impl RenApp {
         let mut vignette = VignettePass::new();
         vignette.init(&device, surface_format, width, height);
 
-        // Create DoF pass (renders to HDR scene)
+        // Create DoF pass (outputs to surface format for vignette texture)
         let mut dof = DofPass::new();
         dof.set_enabled(false); // Disabled by default
-        dof.init(&device, hdr_format, width, height);
+        dof.init(&device, surface_format, width, height);
 
         // Create motion blur pass (renders to HDR scene)
         let motion_blur = MotionBlurPass::new(&device, width, height, hdr_format);
@@ -2719,15 +2719,28 @@ impl RenApp {
         self.dof.set_blur_strength(strength);
     }
 
-    /// Set DoF quality (0=Low, 1=Medium, 2=High).
+    /// Set DoF quality (0=Low, 1=Medium, 2=High, 3=Ultra).
     #[wasm_bindgen]
     pub fn set_dof_quality(&mut self, quality: u32) {
         let q = match quality {
             0 => DofQuality::Low,
             1 => DofQuality::Medium,
-            _ => DofQuality::High,
+            2 => DofQuality::High,
+            _ => DofQuality::Ultra,
         };
         self.dof.set_quality(q);
+    }
+
+    /// Set DoF bokeh highlight boost (0.0 - 2.0).
+    #[wasm_bindgen]
+    pub fn set_dof_highlight_boost(&mut self, boost: f32) {
+        self.dof.set_highlight_boost(boost);
+    }
+
+    /// Set DoF bokeh highlight threshold (0.0 - 1.0).
+    #[wasm_bindgen]
+    pub fn set_dof_highlight_threshold(&mut self, threshold: f32) {
+        self.dof.set_highlight_threshold(threshold);
     }
 
     /// Enable or disable Screen-Space Reflections.
