@@ -16,7 +16,7 @@ use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
-use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, Pass};
+use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, VolumetricFogPass, VolumetricFogQuality, Pass};
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
@@ -180,6 +180,7 @@ pub struct RenApp {
     motion_blur: MotionBlurPass,
     outline: OutlinePass,
     color_correction: ColorCorrectionPass,
+    volumetric_fog: VolumetricFogPass,
     aa_mode: AaMode,
     surface_format: wgpu::TextureFormat,
     hdr_format: wgpu::TextureFormat,
@@ -599,6 +600,11 @@ impl RenApp {
         // Create color correction pass
         let color_correction = ColorCorrectionPass::new(&device, surface_format);
 
+        // Create volumetric fog pass (disabled by default)
+        let mut volumetric_fog = VolumetricFogPass::new();
+        volumetric_fog.set_enabled(false);
+        volumetric_fog.init(&device, &queue, hdr_format, width, height);
+
         // ========== Shadow System Setup ==========
         let shadow_resolution = 1024u32;
         let shadow_config = ShadowConfig::default();
@@ -927,6 +933,7 @@ impl RenApp {
             motion_blur,
             outline,
             color_correction,
+            volumetric_fog,
             aa_mode: AaMode::Fxaa,
             surface_format,
             hdr_format,
@@ -1132,6 +1139,18 @@ impl RenApp {
                 let inv_proj = matrix4_to_array(&camera.projection_matrix().inverse());
                 let view = matrix4_to_array(camera.view_matrix());
                 self.lumen.set_matrices(proj, inv_proj, view, camera.near, camera.far);
+            }
+
+            // Update volumetric fog matrices
+            if self.volumetric_fog.enabled() {
+                let inv_view_proj = matrix4_to_array(&camera.view_projection_matrix().inverse());
+                let camera_pos = [camera.position.x, camera.position.y, camera.position.z];
+                self.volumetric_fog.set_matrices(inv_view_proj, camera_pos, camera.near, camera.far);
+                // Use shadow light direction for god rays
+                let light_dir = self.light_direction;
+                let light_color = self.lights[0][4..7].try_into().unwrap_or([1.0, 1.0, 1.0]);
+                let light_intensity = self.lights[0][3];
+                self.volumetric_fog.set_light(light_dir, light_intensity, light_color);
             }
 
             // Update outline camera planes
@@ -1588,6 +1607,33 @@ impl RenApp {
             );
         }
 
+        // Apply volumetric fog if enabled (adds fog and god rays to scene)
+        // Only apply in Lit mode (render_mode == 0)
+        if self.volumetric_fog.enabled() && self.render_mode == 0 {
+            // Render fog: reads from scene_view, writes to bloom_input_view
+            self.volumetric_fog.render(&mut encoder, &self.depth_view, &self.scene_view, &self.bloom_input_view, &self.device, &self.queue);
+            // Copy result back to scene_view for next passes
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.bloom_input_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.scene_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         // Apply bloom post-processing (reads from bloom_input, additively blends to scene_view)
         // Only apply in Lit mode (render_mode == 0)
         if self.render_mode == 0 {
@@ -1804,6 +1850,7 @@ impl RenApp {
             self.dof.resize(width, height, &self.device);
             self.motion_blur.resize(width, height);
             self.outline.resize(width, height);
+            self.volumetric_fog.resize(width, height, &self.device);
 
             // Update camera aspect ratio
             let mut camera = self.camera.borrow_mut();
@@ -2436,6 +2483,98 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_lumen_thickness(&mut self, thickness: f32) {
         self.lumen.set_thickness(thickness);
+    }
+
+    // ==================== Volumetric Fog ====================
+
+    /// Enable or disable volumetric fog.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_enabled(&mut self, enabled: bool) {
+        self.volumetric_fog.set_enabled(enabled);
+    }
+
+    /// Check if volumetric fog is enabled.
+    #[wasm_bindgen]
+    pub fn is_volumetric_fog_enabled(&self) -> bool {
+        self.volumetric_fog.enabled()
+    }
+
+    /// Set volumetric fog quality (0=Low, 1=Medium, 2=High, 3=Ultra).
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_quality(&mut self, quality: u32) {
+        let q = match quality {
+            0 => VolumetricFogQuality::Low,
+            1 => VolumetricFogQuality::Medium,
+            2 => VolumetricFogQuality::High,
+            _ => VolumetricFogQuality::Ultra,
+        };
+        self.volumetric_fog.set_quality(q);
+    }
+
+    /// Set fog density (0.0 - 1.0).
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_density(&mut self, density: f32) {
+        self.volumetric_fog.set_density(density);
+    }
+
+    /// Set fog start distance.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_start(&mut self, distance: f32) {
+        self.volumetric_fog.set_start_distance(distance);
+    }
+
+    /// Set fog end distance.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_end(&mut self, distance: f32) {
+        self.volumetric_fog.set_end_distance(distance);
+    }
+
+    /// Set fog height falloff (0 = uniform, higher = ground fog).
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_height_falloff(&mut self, falloff: f32) {
+        self.volumetric_fog.set_height_falloff(falloff);
+    }
+
+    /// Set fog base height.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_base_height(&mut self, height: f32) {
+        self.volumetric_fog.set_base_height(height);
+    }
+
+    /// Set fog scattering coefficient.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_scattering(&mut self, scattering: f32) {
+        self.volumetric_fog.set_scattering(scattering);
+    }
+
+    /// Set fog absorption coefficient.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_absorption(&mut self, absorption: f32) {
+        self.volumetric_fog.set_absorption(absorption);
+    }
+
+    /// Set god ray intensity.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_god_ray_intensity(&mut self, intensity: f32) {
+        self.volumetric_fog.set_god_ray_intensity(intensity);
+    }
+
+    /// Set god ray decay.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_god_ray_decay(&mut self, decay: f32) {
+        self.volumetric_fog.set_god_ray_decay(decay);
+    }
+
+    /// Set fog color.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_color(&mut self, r: f32, g: f32, b: f32) {
+        self.volumetric_fog.set_fog_color(r, g, b);
+    }
+
+    /// Enable or disable god rays.
+    #[wasm_bindgen]
+    pub fn set_volumetric_fog_god_rays_enabled(&mut self, enabled: bool) {
+        self.volumetric_fog.set_god_rays_enabled(enabled);
     }
 
     /// Set IBL diffuse intensity (environment lighting).

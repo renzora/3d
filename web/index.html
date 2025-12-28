@@ -804,6 +804,53 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>Volumetric Fog</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Atmospheric fog with god rays and light scattering.</p>
+                <label>
+                    <input type="checkbox" id="fog-enabled">
+                    Enable
+                </label>
+                <label>
+                    Quality
+                    <select id="fog-quality">
+                        <option value="0">Low</option>
+                        <option value="1" selected>Medium</option>
+                        <option value="2">High</option>
+                        <option value="3">Ultra</option>
+                    </select>
+                </label>
+                <label>
+                    Density
+                    <input type="range" id="fog-density" min="0" max="1" step="0.01" value="0.02">
+                    <span class="value" id="fog-density-val">0.02</span>
+                </label>
+                <label>
+                    Max Distance
+                    <input type="range" id="fog-distance" min="10" max="500" step="10" value="100">
+                    <span class="value" id="fog-distance-val">100</span>
+                </label>
+                <label>
+                    Height Falloff
+                    <input type="range" id="fog-height" min="0" max="0.5" step="0.01" value="0.1">
+                    <span class="value" id="fog-height-val">0.10</span>
+                </label>
+                <label>
+                    Scattering
+                    <input type="range" id="fog-scattering" min="0" max="1" step="0.01" value="0.7">
+                    <span class="value" id="fog-scattering-val">0.70</span>
+                </label>
+                <label>
+                    <input type="checkbox" id="fog-godrays" checked>
+                    God Rays
+                </label>
+                <label>
+                    God Ray Intensity
+                    <input type="range" id="fog-godray-intensity" min="0" max="3" step="0.1" value="1.0">
+                    <span class="value" id="fog-godray-intensity-val">1.0</span>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>IBL (Environment Lighting)</h3>
                 <label>
                     Diffuse
@@ -1615,6 +1662,50 @@
                     saveSettings();
                 });
 
+                // Volumetric Fog controls
+                document.getElementById('fog-enabled').addEventListener('change', (e) => {
+                    if (app.set_volumetric_fog_enabled) app.set_volumetric_fog_enabled(e.target.checked);
+                    saveSettings();
+                });
+                document.getElementById('fog-quality').addEventListener('change', (e) => {
+                    if (app.set_volumetric_fog_quality) app.set_volumetric_fog_quality(parseInt(e.target.value));
+                    saveSettings();
+                });
+                document.getElementById('fog-density').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_volumetric_fog_density) app.set_volumetric_fog_density(val);
+                    document.getElementById('fog-density-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+                document.getElementById('fog-distance').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_volumetric_fog_max_distance) app.set_volumetric_fog_max_distance(val);
+                    document.getElementById('fog-distance-val').textContent = val.toFixed(0);
+                    saveSettings();
+                });
+                document.getElementById('fog-height').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_volumetric_fog_height_falloff) app.set_volumetric_fog_height_falloff(val);
+                    document.getElementById('fog-height-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+                document.getElementById('fog-scattering').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_volumetric_fog_scattering) app.set_volumetric_fog_scattering(val);
+                    document.getElementById('fog-scattering-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+                document.getElementById('fog-godrays').addEventListener('change', (e) => {
+                    if (app.set_volumetric_fog_god_rays) app.set_volumetric_fog_god_rays(e.target.checked);
+                    saveSettings();
+                });
+                document.getElementById('fog-godray-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_volumetric_fog_god_ray_intensity) app.set_volumetric_fog_god_ray_intensity(val);
+                    document.getElementById('fog-godray-intensity-val').textContent = val.toFixed(1);
+                    saveSettings();
+                });
+
                 // IBL controls
                 document.getElementById('ibl-diffuse').addEventListener('input', (e) => {
                     const val = parseFloat(e.target.value);
@@ -1785,6 +1876,15 @@
                         lumenIntensity: document.getElementById('lumen-intensity').value,
                         lumenDistance: document.getElementById('lumen-distance').value,
                         lumenThickness: document.getElementById('lumen-thickness').value,
+                        // Volumetric Fog
+                        fogEnabled: document.getElementById('fog-enabled').checked,
+                        fogQuality: document.getElementById('fog-quality').value,
+                        fogDensity: document.getElementById('fog-density').value,
+                        fogDistance: document.getElementById('fog-distance').value,
+                        fogHeight: document.getElementById('fog-height').value,
+                        fogScattering: document.getElementById('fog-scattering').value,
+                        fogGodrays: document.getElementById('fog-godrays').checked,
+                        fogGodrayIntensity: document.getElementById('fog-godray-intensity').value,
                         // IBL
                         iblDiffuse: document.getElementById('ibl-diffuse').value,
                         iblSpecular: document.getElementById('ibl-specular').value,
@@ -1890,6 +1990,14 @@
                         setVal('lumen-intensity', s.lumenIntensity, 'lumen-intensity-val');
                         setVal('lumen-distance', s.lumenDistance, 'lumen-distance-val');
                         setVal('lumen-thickness', s.lumenThickness, 'lumen-thickness-val');
+                        setVal('fog-enabled', s.fogEnabled);
+                        setVal('fog-quality', s.fogQuality);
+                        setVal('fog-density', s.fogDensity, 'fog-density-val');
+                        setVal('fog-distance', s.fogDistance, 'fog-distance-val');
+                        setVal('fog-height', s.fogHeight, 'fog-height-val');
+                        setVal('fog-scattering', s.fogScattering, 'fog-scattering-val');
+                        setVal('fog-godrays', s.fogGodrays);
+                        setVal('fog-godray-intensity', s.fogGodrayIntensity, 'fog-godray-intensity-val');
                         setVal('ibl-diffuse', s.iblDiffuse, 'ibl-diffuse-val');
                         setVal('ibl-specular', s.iblSpecular, 'ibl-specular-val');
                         setVal('aa-mode', s.aaMode);
@@ -1966,6 +2074,14 @@
                     if (app.set_lumen_intensity) app.set_lumen_intensity(parseFloat(document.getElementById('lumen-intensity').value));
                     if (app.set_lumen_max_distance) app.set_lumen_max_distance(parseFloat(document.getElementById('lumen-distance').value));
                     if (app.set_lumen_thickness) app.set_lumen_thickness(parseFloat(document.getElementById('lumen-thickness').value));
+                    if (app.set_volumetric_fog_enabled) app.set_volumetric_fog_enabled(document.getElementById('fog-enabled').checked);
+                    if (app.set_volumetric_fog_quality) app.set_volumetric_fog_quality(parseInt(document.getElementById('fog-quality').value));
+                    if (app.set_volumetric_fog_density) app.set_volumetric_fog_density(parseFloat(document.getElementById('fog-density').value));
+                    if (app.set_volumetric_fog_max_distance) app.set_volumetric_fog_max_distance(parseFloat(document.getElementById('fog-distance').value));
+                    if (app.set_volumetric_fog_height_falloff) app.set_volumetric_fog_height_falloff(parseFloat(document.getElementById('fog-height').value));
+                    if (app.set_volumetric_fog_scattering) app.set_volumetric_fog_scattering(parseFloat(document.getElementById('fog-scattering').value));
+                    if (app.set_volumetric_fog_god_rays) app.set_volumetric_fog_god_rays(document.getElementById('fog-godrays').checked);
+                    if (app.set_volumetric_fog_god_ray_intensity) app.set_volumetric_fog_god_ray_intensity(parseFloat(document.getElementById('fog-godray-intensity').value));
                     if (app.set_ibl_diffuse_intensity) app.set_ibl_diffuse_intensity(parseFloat(document.getElementById('ibl-diffuse').value));
                     if (app.set_ibl_specular_intensity) app.set_ibl_specular_intensity(parseFloat(document.getElementById('ibl-specular').value));
                     app.set_aa_mode(parseInt(document.getElementById('aa-mode').value));

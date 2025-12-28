@@ -15,6 +15,7 @@ mod ssr_pass;
 mod taa_pass;
 mod tonemapping_pass;
 mod vignette_pass;
+mod volumetric_fog_pass;
 
 pub use bloom_pass::*;
 pub use color_correction_pass::*;
@@ -31,3 +32,4 @@ pub use ssr_pass::*;
 pub use taa_pass::*;
 pub use tonemapping_pass::*;
 pub use vignette_pass::*;
+pub use volumetric_fog_pass::*;
