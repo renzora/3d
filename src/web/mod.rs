@@ -16,7 +16,7 @@ use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
-use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, VolumetricFogPass, VolumetricFogQuality, Pass};
+use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, VolumetricFogPass, VolumetricFogQuality, AutoExposurePass, Pass};
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
@@ -169,6 +169,7 @@ pub struct RenApp {
     vignette_view: wgpu::TextureView,
     bloom: BloomPass,
     tonemapping: TonemappingPass,
+    auto_exposure: AutoExposurePass,
     fxaa: FxaaPass,
     smaa: SmaaPass,
     taa: TaaPass,
@@ -550,6 +551,11 @@ impl RenApp {
         tonemapping.set_mode(TonemappingMode::AgX);
         tonemapping.init(&device, surface_format);
 
+        // Create auto-exposure pass (disabled by default, user can enable for eye adaptation)
+        let mut auto_exposure = AutoExposurePass::new();
+        auto_exposure.set_enabled(false);
+        auto_exposure.init(&device, width, height);
+
         // Create FXAA pass
         let mut fxaa = FxaaPass::new();
         fxaa.set_quality(FxaaQuality::High);
@@ -929,6 +935,7 @@ impl RenApp {
             vignette_view,
             bloom,
             tonemapping,
+            auto_exposure,
             fxaa,
             smaa,
             taa,
@@ -1059,7 +1066,7 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn frame(&mut self) -> Result<(), JsValue> {
         let mut clock = self.clock.borrow_mut();
-        let _delta = clock.get_delta() as f32;
+        let delta = clock.get_delta() as f32;
         let _elapsed = clock.get_elapsed_time() as f32;
         drop(clock);
 
@@ -1720,6 +1727,19 @@ impl RenApp {
             post_outline_input
         };
 
+        // Update auto-exposure if enabled (analyzes HDR scene, calculates exposure)
+        if self.auto_exposure.enabled() {
+            let exposure = self.auto_exposure.update(
+                &mut encoder,
+                tonemapping_input,
+                delta,
+                &self.device,
+                &self.queue,
+            );
+            // Apply auto-exposure to tonemapping (convert from EV to linear)
+            self.tonemapping.set_exposure(2.0_f32.powf(exposure));
+        }
+
         // Apply tonemapping post-processing
         self.tonemapping.render(&mut encoder, tonemapping_input, &self.tonemapped_view, &self.device, &self.queue);
 
@@ -2225,10 +2245,61 @@ impl RenApp {
         self.bloom.set_settings(settings);
     }
 
-    /// Set tonemapping exposure.
+    /// Set tonemapping exposure (manual).
+    /// Note: When auto-exposure is enabled, this value is overridden.
     #[wasm_bindgen]
     pub fn set_exposure(&mut self, exposure: f32) {
         self.tonemapping.set_exposure(exposure);
+    }
+
+    // ========== Auto-Exposure ==========
+
+    /// Enable or disable auto-exposure (eye adaptation).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_enabled(&mut self, enabled: bool) {
+        self.auto_exposure.set_enabled(enabled);
+    }
+
+    /// Check if auto-exposure is enabled.
+    #[wasm_bindgen]
+    pub fn is_auto_exposure_enabled(&self) -> bool {
+        self.auto_exposure.enabled()
+    }
+
+    /// Set auto-exposure minimum EV (prevents over-darkening).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_min(&mut self, min_ev: f32) {
+        self.auto_exposure.set_min_exposure(min_ev);
+    }
+
+    /// Set auto-exposure maximum EV (prevents over-brightening).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_max(&mut self, max_ev: f32) {
+        self.auto_exposure.set_max_exposure(max_ev);
+    }
+
+    /// Set auto-exposure adaptation speed (dark to bright).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_speed_up(&mut self, speed: f32) {
+        self.auto_exposure.set_speed_up(speed);
+    }
+
+    /// Set auto-exposure adaptation speed (bright to dark).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_speed_down(&mut self, speed: f32) {
+        self.auto_exposure.set_speed_down(speed);
+    }
+
+    /// Set auto-exposure compensation (manual adjustment on top of auto).
+    #[wasm_bindgen]
+    pub fn set_auto_exposure_compensation(&mut self, ev: f32) {
+        self.auto_exposure.set_exposure_compensation(ev);
+    }
+
+    /// Get current auto-exposure value (in EV).
+    #[wasm_bindgen]
+    pub fn get_auto_exposure_value(&self) -> f32 {
+        self.auto_exposure.current_exposure()
     }
 
     /// Set anti-aliasing mode (0=None, 1=FXAA, 2=SMAA, 3=TAA).

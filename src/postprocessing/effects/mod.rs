@@ -1,5 +1,6 @@
 //! Post-processing effects.
 
+mod auto_exposure_pass;
 mod bloom_pass;
 mod color_correction_pass;
 mod dof_pass;
@@ -17,6 +18,7 @@ mod tonemapping_pass;
 mod vignette_pass;
 mod volumetric_fog_pass;
 
+pub use auto_exposure_pass::*;
 pub use bloom_pass::*;
 pub use color_correction_pass::*;
 pub use dof_pass::*;

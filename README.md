@@ -360,6 +360,8 @@ A high-performance 3D engine built with Rust, wgpu, and WebAssembly featuring Na
 | `gtao_pass.rs` | Ground Truth AO | ✅ |
 | `lumen_pass.rs` | Screen-space Global Illumination | ✅ |
 | `skybox_pass.rs` | Skybox rendering | ✅ |
+| `volumetric_fog_pass.rs` | Volumetric fog with shadow-aware god rays | ✅ |
+| `auto_exposure_pass.rs` | Auto-exposure with histogram-based eye adaptation | ✅ |
 
 ---
 
