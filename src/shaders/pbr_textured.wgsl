@@ -287,9 +287,296 @@ fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> v
     return f0 + (smooth_factor - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// ============ Procedural Sky for IBL ============
+
+// Hash functions for noise
+fn sky_hash31(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn sky_hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn sky_hash22(p: vec2<f32>) -> vec2<f32> {
+    let n = sin(dot(p, vec2<f32>(41.0, 289.0)));
+    return fract(vec2<f32>(262144.0, 32768.0) * n);
+}
+
+// 3D noise for clouds
+fn sky_noise3d(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(
+            mix(sky_hash31(i + vec3<f32>(0.0, 0.0, 0.0)), sky_hash31(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+            mix(sky_hash31(i + vec3<f32>(0.0, 1.0, 0.0)), sky_hash31(i + vec3<f32>(1.0, 1.0, 0.0)), u.x),
+            u.y
+        ),
+        mix(
+            mix(sky_hash31(i + vec3<f32>(0.0, 0.0, 1.0)), sky_hash31(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+            mix(sky_hash31(i + vec3<f32>(0.0, 1.0, 1.0)), sky_hash31(i + vec3<f32>(1.0, 1.0, 1.0)), u.x),
+            u.y
+        ),
+        u.z
+    );
+}
+
+// FBM for clouds
+fn sky_fbm(p: vec3<f32>) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var pos = p;
+    for (var i = 0; i < 5; i++) {
+        value += amplitude * sky_noise3d(pos);
+        amplitude *= 0.5;
+        pos *= 2.0;
+    }
+    return value;
+}
+
+// Rayleigh phase function
+fn sky_rayleigh_phase(cos_theta: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta);
+}
+
+// Mie phase function
+fn sky_mie_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let num = (1.0 - g2);
+    let denom = pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5);
+    return (1.0 / (4.0 * PI)) * num / denom;
+}
+
+// Atmospheric scattering
+fn sky_atmosphere(ray_dir: vec3<f32>, sun_dir: vec3<f32>, sun_intensity: f32) -> vec3<f32> {
+    let cos_theta = dot(ray_dir, sun_dir);
+    let y = ray_dir.y;
+
+    // Rayleigh scattering coefficients (boosted blue)
+    let beta_r = vec3<f32>(6.5e-6, 15.0e-6, 40.0e-6);
+    // Mie scattering
+    let beta_m = vec3<f32>(21e-6 * 2.0);
+
+    // Optical depths
+    let depth_r = exp(-max(y, 0.0) * 5.0) * 8500.0;
+    let depth_m = exp(-max(y, 0.0) * 2.5) * 1200.0;
+
+    let phase_r = sky_rayleigh_phase(cos_theta);
+    let phase_m = sky_mie_phase(cos_theta, 0.8);
+
+    let scatter_r = beta_r * phase_r * depth_r;
+    let scatter_m = beta_m * phase_m * depth_m;
+
+    let sun_color = vec3<f32>(1.0, 0.98, 0.92) * sun_intensity;
+    var sky_color = (scatter_r + scatter_m) * sun_color;
+
+    // Vibrant blue gradient
+    let zenith_blue = vec3<f32>(0.15, 0.35, 0.85) * sun_intensity * 0.08;
+    let blue_gradient = pow(max(0.0, y), 0.6);
+    sky_color += zenith_blue * blue_gradient;
+
+    // Warm horizon
+    let horizon_factor = 1.0 - y;
+    let horizon_warmth = pow(horizon_factor, 3.0) * 0.15;
+    sky_color += vec3<f32>(0.9, 0.85, 0.75) * horizon_warmth * sun_intensity * 0.5;
+
+    // Sunset colors
+    let sun_height = sun_dir.y;
+    if (sun_height < 0.3) {
+        let sunset_factor = 1.0 - sun_height / 0.3;
+        let horizon_glow = pow(horizon_factor, 4.0) * 0.4;
+        sky_color += vec3<f32>(1.8, 0.6, 0.25) * sunset_factor * horizon_glow * sun_color * 0.5;
+    }
+
+    return sky_color;
+}
+
+// Stars
+fn sky_stars(ray_dir: vec3<f32>, sun_height: f32) -> vec3<f32> {
+    if (ray_dir.y < 0.0) { return vec3<f32>(0.0); }
+
+    let star_visibility = smoothstep(0.1, -0.2, sun_height);
+    if (star_visibility <= 0.0) { return vec3<f32>(0.0); }
+
+    let theta = atan2(ray_dir.z, ray_dir.x);
+    let phi = asin(ray_dir.y);
+    let uv = vec2<f32>(theta, phi) * 80.0;
+    let grid_id = floor(uv);
+    let grid_uv = fract(uv) - 0.5;
+
+    var star_color = vec3<f32>(0.0);
+    for (var i = -1; i <= 1; i++) {
+        for (var j = -1; j <= 1; j++) {
+            let offset = vec2<f32>(f32(i), f32(j));
+            let cell_id = grid_id + offset;
+            let rand = sky_hash22(cell_id);
+            let star_pos = offset + rand - 0.5;
+            let d = length(grid_uv - star_pos);
+            let brightness_rand = sky_hash21(cell_id * 1.31);
+
+            if (brightness_rand > 0.92) {
+                let star_size = 0.02 + brightness_rand * 0.03;
+                var star_brightness = smoothstep(star_size, 0.0, d);
+                star_brightness += smoothstep(star_size * 0.3, 0.0, d) * 2.0;
+                star_color += star_brightness * vec3<f32>(1.0) * (0.5 + brightness_rand * 1.5);
+            }
+        }
+    }
+    return star_color * star_visibility;
+}
+
+// Moon
+fn sky_moon(ray_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let moon_dir = -sun_dir;
+    if (sun_dir.y > 0.1) { return vec3<f32>(0.0); }
+
+    let moon_visibility = smoothstep(0.1, -0.1, sun_dir.y);
+    let cos_theta = dot(ray_dir, moon_dir);
+    let moon_angular_radius = 0.009;
+
+    var moon_color = vec3<f32>(0.0);
+    let moon_cos = cos(moon_angular_radius);
+    if (cos_theta > moon_cos) {
+        let edge_factor = (cos_theta - moon_cos) / (1.0 - moon_cos);
+        moon_color = vec3<f32>(0.95, 0.93, 0.88) * smoothstep(0.0, 1.0, edge_factor) * 2.0;
+    }
+
+    // Moon glow
+    let glow_cos = cos(moon_angular_radius * 4.0);
+    if (cos_theta > glow_cos) {
+        let glow_factor = (cos_theta - glow_cos) / (moon_cos - glow_cos);
+        moon_color += vec3<f32>(0.8, 0.85, 0.95) * pow(max(0.0, glow_factor), 2.0) * 0.3;
+    }
+
+    return moon_color * moon_visibility;
+}
+
+// Sun disk with glare
+fn sky_sun(ray_dir: vec3<f32>, sun_dir: vec3<f32>, sun_intensity: f32) -> vec3<f32> {
+    let cos_theta = dot(ray_dir, sun_dir);
+    let sun_angular_radius = 0.5 * 0.00873;
+
+    var sun_color = vec3<f32>(0.0);
+
+    // Core sun disk
+    let core_cos = cos(sun_angular_radius);
+    if (cos_theta > core_cos) {
+        let edge_factor = (cos_theta - core_cos) / (1.0 - core_cos);
+        sun_color += vec3<f32>(1.0, 0.99, 0.95) * smoothstep(0.0, 0.3, edge_factor) * sun_intensity * 0.5;
+    }
+
+    // Outer ring glare
+    let ring_inner = sun_angular_radius;
+    let ring_outer = sun_angular_radius * 2.5;
+    if (cos_theta > cos(ring_outer) && cos_theta < cos(ring_inner)) {
+        let ring_mid = (ring_inner + ring_outer) * 0.5;
+        let angle_from_sun = acos(cos_theta);
+        let ring_width = ring_outer - ring_inner;
+        let dist_from_mid = abs(angle_from_sun - ring_mid) / (ring_width * 0.5);
+        let ring_intensity = (1.0 - dist_from_mid * dist_from_mid) * sun_intensity * 0.2;
+        sun_color += vec3<f32>(1.0, 0.97, 0.9) * max(0.0, ring_intensity);
+    }
+
+    // Soft glow
+    let glow_cos = cos(sun_angular_radius * 6.0);
+    if (cos_theta > glow_cos) {
+        let glow_factor = (cos_theta - glow_cos) / (core_cos - glow_cos);
+        sun_color += vec3<f32>(1.0, 0.95, 0.85) * pow(max(0.0, glow_factor), 3.0) * sun_intensity * 0.08;
+    }
+
+    return sun_color;
+}
+
+// Clouds
+fn sky_clouds(ray_dir: vec3<f32>, sun_dir: vec3<f32>, sun_intensity: f32) -> vec4<f32> {
+    if (ray_dir.y < 0.05) { return vec4<f32>(0.0); }
+
+    let cloud_height = 0.15;
+    let t = cloud_height / max(ray_dir.y, 0.001);
+    let cloud_pos = ray_dir * t;
+    let cloud_uv = cloud_pos.xz * 3.0;
+
+    var density = sky_fbm(vec3<f32>(cloud_uv.x, cloud_uv.y, 0.0));
+    density = smoothstep(0.45, 0.75, density);
+    density *= smoothstep(0.05, 0.2, ray_dir.y);
+    density *= 1.0 - smoothstep(0.6, 1.0, ray_dir.y) * 0.3;
+
+    if (density <= 0.0) { return vec4<f32>(0.0); }
+
+    // Cloud lighting
+    var cloud_color = vec3<f32>(1.0);
+    let sun_dot = dot(ray_dir, sun_dir);
+    let light_factor = sun_dot * 0.3 + 0.7;
+
+    if (sun_dir.y < 0.3) {
+        let sunset_t = 1.0 - sun_dir.y / 0.3;
+        cloud_color = mix(cloud_color, vec3<f32>(1.0, 0.7, 0.4), sunset_t * 0.6);
+    }
+
+    cloud_color *= (light_factor - smoothstep(0.0, 0.5, density) * 0.3 + 0.3);
+    cloud_color *= max(0.4, sun_dir.y * 0.6 + 0.6) * sun_intensity * 0.1;
+
+    if (sun_dir.y < 0.0) {
+        cloud_color *= smoothstep(-0.3, 0.0, sun_dir.y);
+    }
+
+    return vec4<f32>(cloud_color, density);
+}
+
+// Full procedural sky
+fn procedural_sky_color(ray_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let sun_intensity = 22.0;
+    var color: vec3<f32>;
+
+    if (ray_dir.y < 0.0) {
+        // Below horizon - ground reflection
+        let ground_color = vec3<f32>(0.45, 0.40, 0.32);
+        let ground_ambient = max(0.15, sun_dir.y * 0.4 + 0.5);
+        let horizon_sky = sky_atmosphere(vec3<f32>(ray_dir.x, 0.01, ray_dir.z), sun_dir, sun_intensity);
+        let horizon_blend = smoothstep(-0.15, 0.0, ray_dir.y);
+        color = mix(ground_color * ground_ambient, horizon_sky, horizon_blend);
+    } else {
+        // Sky
+        color = sky_atmosphere(ray_dir, sun_dir, sun_intensity);
+        color += sky_stars(ray_dir, sun_dir.y);
+        color += sky_moon(ray_dir, sun_dir);
+
+        // Clouds
+        let cloud = sky_clouds(ray_dir, sun_dir, sun_intensity);
+        if (cloud.a > 0.0) {
+            color = mix(color, cloud.rgb / max(cloud.a, 0.001), cloud.a * 0.9);
+        }
+
+        // Sun
+        if (sun_dir.y > -0.1) {
+            color += sky_sun(ray_dir, sun_dir, sun_intensity);
+        }
+    }
+
+    return color;
+}
+
 // Sample prefiltered environment map for IBL specular reflections
 // Each mip level is convolved with increasing roughness (GGX importance sampling)
 fn sample_env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
+    // Check if procedural sky is enabled (ibl_settings.z > 0)
+    if (camera.ibl_settings.z > 0.5) {
+        // Use full procedural sky - sun direction from shadow uniform
+        let sun_dir = normalize(-shadow.light_dir_or_pos.xyz);
+        let sky = procedural_sky_color(reflect_dir, sun_dir);
+        // Scale by light intensity (spot_params.z) so reflections dim at night
+        let light_intensity = shadow.spot_params.z;
+        // Reduce reflection based on roughness - rough surfaces have very weak reflections
+        let roughness_fade = (1.0 - roughness) * (1.0 - roughness); // Quadratic falloff
+        return sky * 0.04 * light_intensity * roughness_fade;
+    }
+
     // Mip 0 = mirror reflection (roughness 0)
     // Mip 4 = fully rough (roughness 1)
     let max_mip = 4.0;
@@ -302,6 +589,16 @@ fn sample_env_specular(reflect_dir: vec3<f32>, roughness: f32) -> vec3<f32> {
 // The irradiance map is pre-convolved to represent the integral of incoming light
 // over the hemisphere for each direction, giving proper diffuse IBL
 fn sample_env_diffuse(normal: vec3<f32>) -> vec3<f32> {
+    // Check if procedural sky is enabled (ibl_settings.z > 0)
+    if (camera.ibl_settings.z > 0.5) {
+        // Use procedural sky for diffuse - sun direction from shadow uniform
+        let sun_dir = normalize(-shadow.light_dir_or_pos.xyz);
+        let sky = procedural_sky_color(normal, sun_dir);
+        // Scale by light intensity so ambient dims at night
+        let light_intensity = shadow.spot_params.z;
+        return sky * 0.03 * light_intensity;
+    }
+
     // Sample the pre-convolved irradiance cubemap
     // Each texel contains the integral: E(n) = ∫_Ω L(ω) * max(0, n·ω) dω
     let irradiance = textureSample(irradiance_map, irradiance_sampler, normal).rgb;
@@ -758,9 +1055,9 @@ fn calculate_shadow_light(
 
     let h = normalize(v + light_dir);
 
-    // Light color and intensity
+    // Light color and intensity (from shadow uniform)
     let light_color = vec3<f32>(1.0, 0.98, 0.95);
-    let light_intensity = 3.0;
+    let light_intensity = shadow.spot_params.z * 3.0; // spot_params.z is the intensity multiplier
     let radiance = light_color * light_intensity * attenuation * spot_effect;
 
     // Cook-Torrance BRDF

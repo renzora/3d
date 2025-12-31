@@ -16,7 +16,7 @@ use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
 use crate::helpers::{AxesHelper, GridHelper};
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
-use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, VolumetricFogPass, VolumetricFogQuality, AutoExposurePass, Pass};
+use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, ProceduralSkyPass, VolumetricFogPass, VolumetricFogQuality, AutoExposurePass, Pass};
 use crate::texture::CubeTexture;
 use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
@@ -211,6 +211,8 @@ pub struct RenApp {
     shadow_depth_pipeline: wgpu::RenderPipeline,
     shadow_model_bind_group_layout: wgpu::BindGroupLayout,
     light_direction: [f32; 3],
+    light_intensity: f32,
+    light_color: [f32; 3],
     /// Cached light view-projection matrix for volumetric fog.
     light_view_proj_matrix: [[f32; 4]; 4],
     // Shadow light type and spot light settings
@@ -231,6 +233,8 @@ pub struct RenApp {
     skybox_bind_group: wgpu::BindGroup,
     skybox_sampler: wgpu::Sampler,
     skybox_enabled: bool,
+    // Procedural sky
+    procedural_sky: ProceduralSkyPass,
     // Prefiltered environment map for IBL specular
     prefiltered_env_texture: wgpu::Texture,
     prefiltered_env_view: wgpu::TextureView,
@@ -742,6 +746,9 @@ impl RenApp {
             &skybox_sampler,
         );
 
+        // Create procedural sky pass
+        let procedural_sky = ProceduralSkyPass::new(&device, hdr_format);
+
         // ========== BRDF LUT Setup ==========
         // Generate BRDF Look-Up Table for proper IBL split-sum approximation
         let brdf_lut = BrdfLut::new(&device, &queue);
@@ -994,6 +1001,8 @@ impl RenApp {
             shadow_depth_pipeline,
             shadow_model_bind_group_layout,
             light_direction: [-0.5, -1.0, -0.3],
+            light_intensity: 1.0,
+            light_color: [1.0, 1.0, 1.0],
             light_view_proj_matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
             shadow_light_type: ShadowLightType::Directional,
             spot_position: [0.0, 5.0, 0.0],
@@ -1010,6 +1019,7 @@ impl RenApp {
             skybox_bind_group,
             skybox_sampler,
             skybox_enabled: true,
+            procedural_sky,
             prefiltered_env_texture,
             prefiltered_env_view,
             irradiance_texture,
@@ -1084,7 +1094,7 @@ impl RenApp {
     pub fn frame(&mut self) -> Result<(), JsValue> {
         let mut clock = self.clock.borrow_mut();
         let delta = clock.get_delta() as f32;
-        let _elapsed = clock.get_elapsed_time() as f32;
+        let elapsed = clock.get_elapsed_time() as f32;
         drop(clock);
 
         // Update controls and camera
@@ -1124,7 +1134,7 @@ impl RenApp {
                 ibl_settings: [
                     self.ibl_diffuse_intensity,
                     self.ibl_specular_intensity,
-                    0.0,
+                    if self.procedural_sky.enabled() { 1.0 } else { 0.0 },
                     0.0,
                 ],
                 light0_pos: [self.lights[0][0], self.lights[0][1], self.lights[0][2], self.lights[0][3]],
@@ -1200,9 +1210,13 @@ impl RenApp {
             }
 
             // Update skybox uniform (needs inverse view-proj for world direction)
+            let inv_view_proj = matrix4_to_array(&camera.view_projection_matrix().inverse());
             if self.skybox_enabled {
-                let inv_view_proj = matrix4_to_array(&camera.view_projection_matrix().inverse());
                 self.skybox_pass.update_uniform(&self.queue, inv_view_proj);
+            }
+            // Update procedural sky uniform
+            if self.procedural_sky.enabled() {
+                self.procedural_sky.update_uniform(&self.queue, inv_view_proj, elapsed);
             }
         }
 
@@ -1264,7 +1278,7 @@ impl RenApp {
                         light_dir_or_pos: [light_dir.x, light_dir.y, light_dir.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [0.0, -1.0, 0.0, 10.0],
-                        spot_params: [0.9063, 0.9659, 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        spot_params: [0.9063, 0.9659, self.light_intensity, self.shadow_config.pcf_mode as u32 as f32],
                         pcss_params: [
                             self.shadow_config.pcss.light_size,
                             self.shadow_config.pcss.near_plane,
@@ -1304,7 +1318,7 @@ impl RenApp {
                         light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [spot_dir.x, spot_dir.y, spot_dir.z, self.spot_range],
-                        spot_params: [self.spot_outer_angle.cos(), self.spot_inner_angle.cos(), 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        spot_params: [self.spot_outer_angle.cos(), self.spot_inner_angle.cos(), self.light_intensity, self.shadow_config.pcf_mode as u32 as f32],
                         pcss_params: [
                             self.shadow_config.pcss.light_size,
                             self.shadow_config.pcss.near_plane,
@@ -1338,7 +1352,7 @@ impl RenApp {
                         light_dir_or_pos: [light_pos.x, light_pos.y, light_pos.z, 0.0],
                         shadow_map_size: [resolution, resolution, 1.0 / resolution, 1.0 / resolution],
                         spot_direction: [0.0, -1.0, 0.0, self.spot_range], // w = range for cube sampling
-                        spot_params: [0.0, 0.0, 1.0, self.shadow_config.pcf_mode as u32 as f32],
+                        spot_params: [0.0, 0.0, self.light_intensity, self.shadow_config.pcf_mode as u32 as f32],
                         pcss_params: [
                             self.shadow_config.pcss.light_size,
                             self.shadow_config.pcss.near_plane,
@@ -1541,10 +1555,15 @@ impl RenApp {
                 occlusion_query_set: None,
             });
 
-            // Render skybox first (at far depth, behind everything)
-            // Skip skybox for flat mode (8) and wireframe mode (9)
-            if self.skybox_enabled && self.render_mode != 8 && self.render_mode != 9 {
-                self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
+            // Render sky first (at far depth, behind everything)
+            // Skip sky for flat mode (8) and wireframe mode (9)
+            if self.render_mode != 8 && self.render_mode != 9 {
+                // Procedural sky takes priority if enabled
+                if self.procedural_sky.enabled() {
+                    self.procedural_sky.render(&mut render_pass);
+                } else if self.skybox_enabled {
+                    self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
+                }
             }
 
             // Render PBR meshes (use wireframe pipeline if enabled and available)
@@ -1937,7 +1956,7 @@ impl RenApp {
                 ibl_settings: [
                     self.ibl_diffuse_intensity,
                     self.ibl_specular_intensity,
-                    0.0,
+                    if self.procedural_sky.enabled() { 1.0 } else { 0.0 },
                     0.0,
                 ],
                 light0_pos: [self.lights[0][0], self.lights[0][1], self.lights[0][2], self.lights[0][3]],
@@ -3182,6 +3201,9 @@ impl RenApp {
 
         self.surface.configure(&self.device, &config);
 
+        // Set HDR output mode on tonemapping pass
+        self.tonemapping.set_hdr_output(enabled);
+
         // Reinitialize post-tonemapping passes with new format
         self.tonemapping.init(&self.device, new_format);
         self.fxaa.init(&self.device, new_format, self.width, self.height);
@@ -3371,6 +3393,133 @@ impl RenApp {
         );
 
         Ok(())
+    }
+
+    // ========== Procedural Sky ==========
+
+    /// Enable or disable procedural sky (replaces cubemap skybox when enabled).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_enabled(&mut self, enabled: bool) {
+        self.procedural_sky.set_enabled(enabled);
+    }
+
+    /// Check if procedural sky is enabled.
+    #[wasm_bindgen]
+    pub fn is_procedural_sky_enabled(&self) -> bool {
+        self.procedural_sky.enabled()
+    }
+
+    /// Set sun position from azimuth and elevation angles (in degrees).
+    /// Azimuth: 0-360 (compass direction), Elevation: -90 to 90 (height above horizon).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_sun_position(&mut self, azimuth: f32, elevation: f32) {
+        self.procedural_sky.set_sun_position(azimuth, elevation);
+    }
+
+    /// Set sun direction directly (will be normalized).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_sun_direction(&mut self, x: f32, y: f32, z: f32) {
+        self.procedural_sky.set_sun_direction(x, y, z);
+    }
+
+    /// Set sun intensity.
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_sun_intensity(&mut self, intensity: f32) {
+        self.procedural_sky.set_sun_intensity(intensity);
+    }
+
+    /// Set Rayleigh scattering coefficient (controls blue sky intensity).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_rayleigh(&mut self, coefficient: f32) {
+        self.procedural_sky.set_rayleigh(coefficient);
+    }
+
+    /// Set Mie scattering coefficient (controls haze/glow around sun).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_mie(&mut self, coefficient: f32) {
+        self.procedural_sky.set_mie(coefficient);
+    }
+
+    /// Set Mie directional G (-1 to 1, controls sun glow concentration).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_mie_directional(&mut self, g: f32) {
+        self.procedural_sky.set_mie_directional_g(g);
+    }
+
+    /// Set atmospheric turbidity (1-10, affects haziness).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_turbidity(&mut self, turbidity: f32) {
+        self.procedural_sky.set_turbidity(turbidity);
+    }
+
+    /// Set sun disk angular size in degrees.
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_sun_size(&mut self, size: f32) {
+        self.procedural_sky.set_sun_disk_size(size);
+    }
+
+    /// Set sun disk brightness.
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_sun_disk_intensity(&mut self, intensity: f32) {
+        self.procedural_sky.set_sun_disk_intensity(intensity);
+    }
+
+    /// Set ground/horizon color (RGB 0-1).
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_ground_color(&mut self, r: f32, g: f32, b: f32) {
+        self.procedural_sky.set_ground_color(r, g, b);
+    }
+
+    /// Set procedural sky exposure.
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_exposure(&mut self, exposure: f32) {
+        self.procedural_sky.set_exposure(exposure);
+    }
+
+    /// Set procedural sky cloud movement speed.
+    #[wasm_bindgen]
+    pub fn set_procedural_sky_cloud_speed(&mut self, speed: f32) {
+        self.procedural_sky.set_cloud_speed(speed);
+    }
+
+    /// Update environment maps (skybox and irradiance) from procedural sky.
+    /// Call this to make PBR materials reflect the procedural sky.
+    #[wasm_bindgen]
+    pub fn update_procedural_sky_environment(&mut self) {
+        use crate::ibl::generate_irradiance_cubemap;
+
+        // Generate cubemap faces from procedural sky (64x64 is enough for IBL)
+        let face_size = 64u32;
+        let faces = self.procedural_sky.generate_cubemap_faces(face_size);
+
+        // Update skybox texture for reflections
+        self.skybox_texture = CubeTexture::from_faces_owned(&self.device, &self.queue, &faces, face_size);
+
+        // Generate irradiance map for diffuse IBL
+        self.irradiance_texture = generate_irradiance_cubemap(
+            &self.device,
+            &self.queue,
+            &faces,
+            face_size,
+            32, // Irradiance is low frequency, 32x32 is fine
+        );
+        self.irradiance_view = self.irradiance_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
+        // Update PBR bind groups to use new environment maps
+        self.update_pbr_environment_bind_groups();
+    }
+
+    /// Internal method to update PBR bind groups with new environment maps.
+    fn update_pbr_environment_bind_groups(&mut self) {
+        // Recreate the skybox bind group with the new texture
+        self.skybox_bind_group = self.skybox_pass.create_texture_bind_group(
+            &self.device,
+            self.skybox_texture.view(),
+            &self.skybox_sampler,
+        );
     }
 
     // ========== Shadows ==========
@@ -3579,6 +3728,18 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_shadow_light_direction(&mut self, x: f32, y: f32, z: f32) {
         self.light_direction = [x, y, z];
+    }
+
+    /// Set the directional light intensity (0-1 for night, 1+ for day).
+    #[wasm_bindgen]
+    pub fn set_directional_light_intensity(&mut self, intensity: f32) {
+        self.light_intensity = intensity.max(0.0);
+    }
+
+    /// Set the directional light color (RGB 0-1).
+    #[wasm_bindgen]
+    pub fn set_directional_light_color(&mut self, r: f32, g: f32, b: f32) {
+        self.light_color = [r, g, b];
     }
 
     /// Set shadow light type (0=directional, 1=spot, 2=point).

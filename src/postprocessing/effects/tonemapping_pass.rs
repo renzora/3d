@@ -60,6 +60,8 @@ pub struct TonemappingSettings {
     pub contrast: f32,
     /// Saturation adjustment.
     pub saturation: f32,
+    /// HDR output mode (skips gamma correction).
+    pub hdr_output: bool,
 }
 
 impl Default for TonemappingSettings {
@@ -70,6 +72,7 @@ impl Default for TonemappingSettings {
             gamma: 2.2,
             contrast: 1.0,
             saturation: 1.0,
+            hdr_output: false,
         }
     }
 }
@@ -85,7 +88,7 @@ struct TonemappingUniform {
     contrast: f32,      // offset 8
     saturation: f32,    // offset 12
     mode: u32,          // offset 16
-    _pad1: u32,         // offset 20 - padding to align vec3 to 16 bytes
+    hdr_output: u32,    // offset 20 - 1 for HDR output, 0 for SDR
     _pad2: u32,         // offset 24
     _pad3: u32,         // offset 28
     _padding: [f32; 3], // offset 32 (aligned to 16)
@@ -201,7 +204,7 @@ impl TonemappingPass {
             contrast: self.settings.contrast,
             saturation: self.settings.saturation,
             mode: self.settings.mode.as_u32(),
-            _pad1: 0,
+            hdr_output: if self.settings.hdr_output { 1 } else { 0 },
             _pad2: 0,
             _pad3: 0,
             _padding: [0.0; 3],
@@ -274,7 +277,7 @@ impl TonemappingPass {
                 contrast: self.settings.contrast,
                 saturation: self.settings.saturation,
                 mode: self.settings.mode.as_u32(),
-                _pad1: 0,
+                hdr_output: if self.settings.hdr_output { 1 } else { 0 },
                 _pad2: 0,
                 _pad3: 0,
                 _padding: [0.0; 3],
@@ -282,6 +285,11 @@ impl TonemappingPass {
             };
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&[uniform]));
         }
+    }
+
+    /// Set HDR output mode (skips gamma correction).
+    pub fn set_hdr_output(&mut self, enabled: bool) {
+        self.settings.hdr_output = enabled;
     }
 }
 
@@ -384,7 +392,8 @@ struct Params {
     contrast: f32,
     saturation: f32,
     mode: u32,
-    _padding: vec3<f32>,
+    hdr_output: u32,
+    _padding: vec2<u32>,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -592,10 +601,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply saturation
     color = adjust_saturation(color, params.saturation);
 
-    // Apply gamma correction
-    color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / params.gamma));
+    // Apply gamma correction only for SDR output
+    // HDR displays expect linear or PQ-encoded values
+    if (params.hdr_output == 0u) {
+        color = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / params.gamma));
+    }
 
-    // Apply dithering to break up banding (before 8-bit quantization)
+    // Apply dithering to break up banding
     color = dither(color, in.position.xy);
 
     return vec4<f32>(color, 1.0);

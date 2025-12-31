@@ -443,6 +443,59 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>Procedural Sky</h3>
+                <label>
+                    <input type="checkbox" id="procedural-sky-enabled">
+                    Enable (replaces skybox)
+                </label>
+                <label>
+                    Sun Azimuth
+                    <input type="range" id="procedural-sky-azimuth" min="0" max="360" step="1" value="180">
+                    <span class="value" id="procedural-sky-azimuth-val">180</span>
+                </label>
+                <label>
+                    Sun Elevation
+                    <input type="range" id="procedural-sky-elevation" min="-10" max="90" step="1" value="45">
+                    <span class="value" id="procedural-sky-elevation-val">45</span>
+                </label>
+                <label>
+                    Sun Intensity
+                    <input type="range" id="procedural-sky-sun-intensity" min="1" max="50" step="1" value="22">
+                    <span class="value" id="procedural-sky-sun-intensity-val">22</span>
+                </label>
+                <label>
+                    Turbidity
+                    <input type="range" id="procedural-sky-turbidity" min="1" max="10" step="0.5" value="2">
+                    <span class="value" id="procedural-sky-turbidity-val">2.0</span>
+                </label>
+                <label>
+                    Rayleigh
+                    <input type="range" id="procedural-sky-rayleigh" min="0" max="4" step="0.1" value="1">
+                    <span class="value" id="procedural-sky-rayleigh-val">1.0</span>
+                </label>
+                <label>
+                    Mie
+                    <input type="range" id="procedural-sky-mie" min="0" max="4" step="0.1" value="1">
+                    <span class="value" id="procedural-sky-mie-val">1.0</span>
+                </label>
+                <label>
+                    Mie Direction
+                    <input type="range" id="procedural-sky-mie-g" min="0" max="0.999" step="0.01" value="0.8">
+                    <span class="value" id="procedural-sky-mie-g-val">0.80</span>
+                </label>
+                <label>
+                    Exposure
+                    <input type="range" id="procedural-sky-exposure" min="0.1" max="3" step="0.1" value="1">
+                    <span class="value" id="procedural-sky-exposure-val">1.0</span>
+                </label>
+                <label>
+                    Cloud Speed
+                    <input type="range" id="procedural-sky-cloud-speed" min="0" max="0.1" step="0.005" value="0.02">
+                    <span class="value" id="procedural-sky-cloud-speed-val">0.02</span>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>Shadows</h3>
                 <label>
                     <input type="checkbox" id="shadows-enabled" checked>
@@ -1231,6 +1284,75 @@
                     const len = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
                     app.set_shadow_light_direction(dirX / len, dirY / len, dirZ / len);
 
+                    // Update procedural sky sun position
+                    // Azimuth: 90° (east) at sunrise, 180° (south) at noon, 270° (west) at sunset
+                    const azimuth = (time * 360 + 90) % 360;
+                    // Elevation: convert sunHeight (-1 to 1) to degrees (-90 to 90)
+                    const elevation = Math.asin(Math.max(-1, Math.min(1, sunHeight))) * (180 / Math.PI);
+                    app.set_procedural_sky_sun_position(azimuth, elevation);
+
+                    // Update procedural sky and directional light based on time of day
+                    if (sunHeight < -0.1) {
+                        // Night - very dim
+                        app.set_procedural_sky_sun_intensity(0.5);
+                        app.set_procedural_sky_exposure(0.3);
+                        app.set_procedural_sky_rayleigh(0.4);
+                        app.set_procedural_sky_mie(0.1);
+                        app.set_procedural_sky_turbidity(1.0);
+                        app.set_procedural_sky_ground_color(0.03, 0.03, 0.06);
+                        // Directional light very dim at night
+                        app.set_directional_light_intensity(0.05);
+                    } else if (sunHeight < 0.3) {
+                        // Sunrise/Sunset - warm, medium intensity
+                        const t = (sunHeight + 0.1) / 0.4;
+                        app.set_procedural_sky_sun_intensity(8 + t * 14);
+                        app.set_procedural_sky_exposure(0.5 + t * 0.7);
+                        app.set_procedural_sky_rayleigh(0.6 + t * 0.4);
+                        app.set_procedural_sky_mie(1.5 - t * 0.5);
+                        app.set_procedural_sky_turbidity(3.0 - t * 1.0);
+                        const groundR = 0.2 + t * 0.25;
+                        const groundG = 0.15 + t * 0.22;
+                        const groundB = 0.1 + t * 0.18;
+                        app.set_procedural_sky_ground_color(groundR, groundG, groundB);
+                        // Directional light increases with sun height
+                        app.set_directional_light_intensity(0.2 + t * 0.8);
+                    } else {
+                        // Day - full intensity
+                        app.set_procedural_sky_sun_intensity(22);
+                        app.set_procedural_sky_exposure(1.2);
+                        app.set_procedural_sky_rayleigh(1.2);
+                        app.set_procedural_sky_mie(0.8);
+                        app.set_procedural_sky_turbidity(2.0);
+                        app.set_procedural_sky_ground_color(0.45, 0.40, 0.32);
+                        // Full directional light during day
+                        app.set_directional_light_intensity(1.0);
+                    }
+
+                    // Update UI sliders to reflect current values
+                    document.getElementById('procedural-sky-azimuth').value = azimuth;
+                    document.getElementById('procedural-sky-azimuth-val').textContent = Math.round(azimuth);
+                    document.getElementById('procedural-sky-elevation').value = Math.max(-10, elevation);
+                    document.getElementById('procedural-sky-elevation-val').textContent = Math.round(elevation);
+
+                    // Update other procedural sky sliders to show dynamic values
+                    const t = sunHeight < -0.1 ? 0 : (sunHeight < 0.3 ? (sunHeight + 0.1) / 0.4 : 1);
+                    const sunIntensity = sunHeight < -0.1 ? 0.5 : (sunHeight < 0.3 ? 8 + t * 14 : 22);
+                    const skyExposure = sunHeight < -0.1 ? 0.3 : (sunHeight < 0.3 ? 0.5 + t * 0.7 : 1.2);
+                    const rayleigh = sunHeight < -0.1 ? 0.4 : (sunHeight < 0.3 ? 0.6 + t * 0.4 : 1.2);
+                    const mie = sunHeight < -0.1 ? 0.1 : (sunHeight < 0.3 ? 1.5 - t * 0.5 : 0.8);
+                    const turbidity = sunHeight < -0.1 ? 1.0 : (sunHeight < 0.3 ? 3.0 - t * 1.0 : 2.0);
+
+                    document.getElementById('procedural-sky-sun-intensity').value = sunIntensity;
+                    document.getElementById('procedural-sky-sun-intensity-val').textContent = Math.round(sunIntensity);
+                    document.getElementById('procedural-sky-exposure').value = skyExposure;
+                    document.getElementById('procedural-sky-exposure-val').textContent = skyExposure.toFixed(1);
+                    document.getElementById('procedural-sky-rayleigh').value = rayleigh;
+                    document.getElementById('procedural-sky-rayleigh-val').textContent = rayleigh.toFixed(1);
+                    document.getElementById('procedural-sky-mie').value = mie;
+                    document.getElementById('procedural-sky-mie-val').textContent = mie.toFixed(1);
+                    document.getElementById('procedural-sky-turbidity').value = turbidity;
+                    document.getElementById('procedural-sky-turbidity-val').textContent = turbidity.toFixed(1);
+
                     // Calculate sky colors based on time of day
                     let skyR, skyG, skyB, horizonR, horizonG, horizonB, groundR, groundG, groundB;
                     let hemiSkyR, hemiSkyG, hemiSkyB, hemiGroundR, hemiGroundG, hemiGroundB, hemiIntensity;
@@ -1793,6 +1915,65 @@
                         loadingEl.textContent = 'Error: ' + err;
                         console.error('HDR load error:', err);
                     }
+                });
+
+                // Procedural Sky controls
+                document.getElementById('procedural-sky-enabled').addEventListener('change', (e) => {
+                    app.set_procedural_sky_enabled(e.target.checked);
+                    // Sync with current time of day when enabled
+                    if (e.target.checked) {
+                        updateSunFromTime(dayNightTime);
+                    }
+                });
+
+                const updateProceduralSkySun = () => {
+                    const azimuth = parseFloat(document.getElementById('procedural-sky-azimuth').value);
+                    const elevation = parseFloat(document.getElementById('procedural-sky-elevation').value);
+                    app.set_procedural_sky_sun_position(azimuth, elevation);
+                };
+
+                document.getElementById('procedural-sky-azimuth').addEventListener('input', (e) => {
+                    document.getElementById('procedural-sky-azimuth-val').textContent = e.target.value;
+                    updateProceduralSkySun();
+                });
+                document.getElementById('procedural-sky-elevation').addEventListener('input', (e) => {
+                    document.getElementById('procedural-sky-elevation-val').textContent = e.target.value;
+                    updateProceduralSkySun();
+                });
+                document.getElementById('procedural-sky-sun-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_sun_intensity(val);
+                    document.getElementById('procedural-sky-sun-intensity-val').textContent = val;
+                });
+                document.getElementById('procedural-sky-turbidity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_turbidity(val);
+                    document.getElementById('procedural-sky-turbidity-val').textContent = val.toFixed(1);
+                });
+                document.getElementById('procedural-sky-rayleigh').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_rayleigh(val);
+                    document.getElementById('procedural-sky-rayleigh-val').textContent = val.toFixed(1);
+                });
+                document.getElementById('procedural-sky-mie').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_mie(val);
+                    document.getElementById('procedural-sky-mie-val').textContent = val.toFixed(1);
+                });
+                document.getElementById('procedural-sky-mie-g').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_mie_directional(val);
+                    document.getElementById('procedural-sky-mie-g-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('procedural-sky-exposure').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_exposure(val);
+                    document.getElementById('procedural-sky-exposure-val').textContent = val.toFixed(1);
+                });
+                document.getElementById('procedural-sky-cloud-speed').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    app.set_procedural_sky_cloud_speed(val);
+                    document.getElementById('procedural-sky-cloud-speed-val').textContent = val.toFixed(3);
                 });
 
                 // SSAO bias control
