@@ -66,7 +66,7 @@ impl Default for WebShadowUniform {
             light_view_proj: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
             shadow_params: [0.005, 0.02, 0.0, 0.0], // bias, normal_bias, disabled, directional
             light_dir_or_pos: [-0.5, -1.0, -0.3, 0.0],
-            shadow_map_size: [1024.0, 1024.0, 1.0 / 1024.0, 1.0 / 1024.0],
+            shadow_map_size: [2048.0, 2048.0, 1.0 / 2048.0, 1.0 / 2048.0],
             spot_direction: [0.0, -1.0, 0.0, 10.0], // direction (0,-1,0), range 10
             spot_params: [0.9063, 0.9659, 1.0, 2.0], // cos(25°), cos(15°), intensity 1, pcf_mode (Soft3x3)
             pcss_params: [0.5, 0.1, 5.0, 10.0], // light_size, near_plane, blocker_search_radius, max_filter_radius
@@ -628,8 +628,8 @@ impl RenApp {
         volumetric_fog.init(&device, &queue, hdr_format, width, height);
 
         // ========== Shadow System Setup ==========
-        let shadow_resolution = 1024u32;
         let shadow_config = ShadowConfig::default();
+        let shadow_resolution = shadow_config.resolution;
 
         // Create shadow map depth texture
         let shadow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -851,9 +851,9 @@ impl RenApp {
             push_constant_ranges: &[],
         });
 
-        // Vertex buffer layout matching the existing Vertex struct
+        // Vertex buffer layout matching the expanded vertex format (with barycentric coords)
         let shadow_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: 32, // 3 floats pos + 3 floats normal + 2 floats uv = 8 floats = 32 bytes
+            array_stride: 44, // 3 floats pos + 3 floats normal + 2 floats uv + 3 floats bary = 11 floats = 44 bytes
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x3,
@@ -2281,6 +2281,14 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_exposure(&mut self, exposure: f32) {
         self.tonemapping.set_exposure(exposure);
+    }
+
+    /// Set tonemapping mode.
+    /// 0=Linear, 1=Reinhard, 2=ReinhardLum, 3=ACES, 4=Uncharted2, 5=AgX
+    #[wasm_bindgen]
+    pub fn set_tonemapping_mode(&mut self, mode: u32) {
+        use crate::prelude::TonemappingMode;
+        self.tonemapping.set_mode(TonemappingMode::from_u32(mode));
     }
 
     // ========== Auto-Exposure ==========

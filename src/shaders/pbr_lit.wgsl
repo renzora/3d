@@ -430,13 +430,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let hemisphere_ambient = calculate_hemisphere_light(n);
     let ambient = (flat_ambient + hemisphere_ambient) * albedo * ao;
 
-    var color = ambient + lo;
-
-    // HDR tonemapping (Reinhard)
-    color = color / (color + vec3<f32>(1.0));
-
-    // Gamma correction
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    // Output linear HDR color - tonemapping and gamma are handled in post-processing
+    let color = ambient + lo;
 
     return vec4<f32>(color, 1.0);
 }

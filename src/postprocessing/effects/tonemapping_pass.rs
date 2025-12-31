@@ -32,6 +32,19 @@ impl TonemappingMode {
             TonemappingMode::AgX => 5,
         }
     }
+
+    /// Create from u32 value.
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => TonemappingMode::Linear,
+            1 => TonemappingMode::Reinhard,
+            2 => TonemappingMode::ReinhardLuminance,
+            3 => TonemappingMode::Aces,
+            4 => TonemappingMode::Uncharted2,
+            5 => TonemappingMode::AgX,
+            _ => TonemappingMode::Aces, // Default to ACES
+        }
+    }
 }
 
 /// Tonemapping settings.
@@ -398,14 +411,50 @@ fn tonemap_reinhard_luminance(color: vec3<f32>) -> vec3<f32> {
     return color * (mapped_luminance / luminance);
 }
 
-// ACES filmic tonemapping
-fn tonemap_aces(color: vec3<f32>) -> vec3<f32> {
+// ACES Filmic Tone Mapping (Narkowicz approximation - fast)
+fn tonemap_aces_fast(color: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
     let b = 0.03;
     let c = 2.43;
     let d = 0.59;
     let e = 0.14;
     return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+}
+
+// sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
+fn aces_input_matrix(color: vec3<f32>) -> vec3<f32> {
+    let m = mat3x3<f32>(
+        vec3<f32>(0.59719, 0.07600, 0.02840),
+        vec3<f32>(0.35458, 0.90834, 0.13383),
+        vec3<f32>(0.04823, 0.01566, 0.83777)
+    );
+    return m * color;
+}
+
+// ODT_SAT => XYZ => D60_2_D65 => sRGB
+fn aces_output_matrix(color: vec3<f32>) -> vec3<f32> {
+    let m = mat3x3<f32>(
+        vec3<f32>( 1.60475, -0.10208, -0.00327),
+        vec3<f32>(-0.53108,  1.10813, -0.07276),
+        vec3<f32>(-0.07367, -0.00605,  1.07602)
+    );
+    return m * color;
+}
+
+// RRT and ODT fit
+fn rrt_and_odt_fit(v: vec3<f32>) -> vec3<f32> {
+    let a = v * (v + 0.0245786) - 0.000090537;
+    let b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return a / b;
+}
+
+// Full ACES Filmic Tone Mapping (Stephen Hill's fit)
+// This is the proper RRT+ODT used in film production
+fn tonemap_aces(color: vec3<f32>) -> vec3<f32> {
+    var c = aces_input_matrix(color);
+    c = rrt_and_odt_fit(c);
+    c = aces_output_matrix(c);
+    return saturate(c);
 }
 
 // Uncharted 2 tonemapping helper
@@ -427,21 +476,58 @@ fn tonemap_uncharted2(color: vec3<f32>) -> vec3<f32> {
     return curr * white_scale;
 }
 
-// AgX tonemapping (simplified approximation)
-fn tonemap_agx(color: vec3<f32>) -> vec3<f32> {
-    // AgX log encoding
-    let agx_min = -12.47393;
-    let agx_max = 4.026069;
+// AgX tonemapping (Blender 4.0+ / Troy Sobotka)
+// Attempt to be more perceptually uniform and preserve hues
 
-    let log_color = log2(max(color, vec3<f32>(1e-10)));
-    let encoded = (log_color - agx_min) / (agx_max - agx_min);
-    let clamped = saturate(encoded);
+// AgX inset matrix (sRGB to AgX working space)
+fn agx_inset_matrix(color: vec3<f32>) -> vec3<f32> {
+    let m = mat3x3<f32>(
+        vec3<f32>(0.842479062253094,  0.0423282422610123, 0.0423756549057051),
+        vec3<f32>(0.0784335999999992, 0.878468636469772,  0.0784336),
+        vec3<f32>(0.0792237451477643, 0.0791661274605434, 0.879142973793104)
+    );
+    return m * color;
+}
 
-    // Simplified AgX look
-    let x = clamped;
+// AgX outset matrix (AgX working space to sRGB)
+fn agx_outset_matrix(color: vec3<f32>) -> vec3<f32> {
+    let m = mat3x3<f32>(
+        vec3<f32>( 1.19687900512017,   -0.0528968517574562, -0.0529716355144438),
+        vec3<f32>(-0.0980208811401368,  1.15190312990417,   -0.0980434501171241),
+        vec3<f32>(-0.0990297440797205, -0.0989611768448433,  1.15107367264116)
+    );
+    return m * color;
+}
+
+// AgX sigmoid curve approximation
+fn agx_default_contrast_approx(x: vec3<f32>) -> vec3<f32> {
+    // 6th order polynomial approximation of AgX sigmoid
     let x2 = x * x;
     let x4 = x2 * x2;
     return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
+fn tonemap_agx(color: vec3<f32>) -> vec3<f32> {
+    let agx_min_ev = -12.47393;
+    let agx_max_ev = 4.026069;
+
+    // Apply inset matrix (approximates rec2020 / wide gamut handling)
+    var c = agx_inset_matrix(color);
+
+    // Log2 encoding
+    c = max(c, vec3<f32>(1e-10));
+    c = log2(c);
+    c = (c - agx_min_ev) / (agx_max_ev - agx_min_ev);
+    c = saturate(c);
+
+    // Apply sigmoid curve
+    c = agx_default_contrast_approx(c);
+
+    // Apply outset matrix to return to sRGB-ish
+    c = agx_outset_matrix(c);
+
+    // Clamp to valid range
+    return saturate(c);
 }
 
 // Saturation adjustment
