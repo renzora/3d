@@ -133,6 +133,9 @@ pub struct RenApp {
     surface_config: wgpu::SurfaceConfiguration,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    // Copy of depth texture for particle soft-fade (can't read and write same texture)
+    depth_copy_texture: wgpu::Texture,
+    depth_copy_view: wgpu::TextureView,
     clear_color: Color,
     clock: RefCell<Clock>,
     frame_count: RefCell<u64>,
@@ -255,6 +258,9 @@ pub struct RenApp {
     // Wireframe rendering
     wireframe_supported: bool,
     wireframe_enabled: bool,
+    // Particle systems
+    particle_systems: Vec<crate::particles::ParticleSystem>,
+    particle_sampler: wgpu::Sampler,
 }
 
 #[wasm_bindgen]
@@ -372,10 +378,23 @@ impl RenApp {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: depth_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Depth copy texture for particle soft-fade (can't read and write same texture in a pass)
+        let depth_copy_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Copy Texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: depth_format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let depth_copy_view = depth_copy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create material and pipeline (target HDR format for full precision)
         let mut material = TexturedPbrMaterial::new();
@@ -757,6 +776,18 @@ impl RenApp {
         // Generate procedural detail normal map for micro-surface detail
         let detail_normal_map = crate::texture::DetailNormalMap::new(&device, &queue);
 
+        // ========== Particle System Sampler ==========
+        let particle_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Particle Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         // ========== Prefiltered Environment Map ==========
         // Generate prefiltered cubemap for roughness-based IBL specular
         // Each mip level is convolved for increasing roughness
@@ -925,6 +956,8 @@ impl RenApp {
             surface_config,
             depth_texture,
             depth_view,
+            depth_copy_texture,
+            depth_copy_view,
             clear_color: Color::new(0.05, 0.05, 0.08),
             clock: RefCell::new(clock),
             frame_count: RefCell::new(0),
@@ -1033,6 +1066,8 @@ impl RenApp {
             render_mode: 0,
             wireframe_supported,
             wireframe_enabled: false,
+            particle_systems: Vec::new(),
+            particle_sampler,
         })
     }
 
@@ -1612,6 +1647,125 @@ impl RenApp {
             }
         }
 
+        // ========== Particle System Update (Compute Pass) ==========
+        // Calculate camera right/up vectors for billboarding from view matrix
+        let (camera_right, camera_up, cam_near, cam_far) = {
+            let mut camera = self.camera.borrow_mut();
+            let view_matrix = camera.view_matrix();
+            let view_elems = &view_matrix.elements;
+            // Camera right is the first row of the view matrix
+            let right = [view_elems[0], view_elems[4], view_elems[8]];
+            // Camera up is the second row of the view matrix
+            let up = [view_elems[1], view_elems[5], view_elems[9]];
+            (right, up, camera.near, camera.far)
+        };
+
+        for particle_system in &mut self.particle_systems {
+            // Update render params with camera vectors each frame
+            particle_system.update_render_params(
+                &self.queue,
+                self.width,
+                self.height,
+                cam_near,
+                cam_far,
+                camera_right,
+                camera_up,
+            );
+            particle_system.update(&mut encoder, delta, &self.queue);
+        }
+
+        // ========== Particle System Rendering ==========
+        // Render particles after main geometry but before post-processing
+        // Separate pass for each blend mode
+        if !self.particle_systems.is_empty() {
+            // Copy depth texture to depth_copy for soft particle sampling
+            // (Can't read and write same texture in a render pass)
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.depth_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.depth_copy_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            // Collect systems by blend mode
+            let additive_systems: Vec<_> = self.particle_systems.iter()
+                .filter(|ps| ps.visible && ps.blend_mode() == crate::particles::ParticleBlendMode::Additive)
+                .collect();
+            let alpha_systems: Vec<_> = self.particle_systems.iter()
+                .filter(|ps| ps.visible && ps.blend_mode() == crate::particles::ParticleBlendMode::AlphaBlend)
+                .collect();
+
+            // Render alpha-blended particles first (they need proper depth order)
+            if !alpha_systems.is_empty() {
+                let mut particle_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Alpha Particle Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                for ps in alpha_systems {
+                    ps.render(&mut particle_pass, &self.camera_bind_group);
+                }
+            }
+
+            // Render additive particles (order-independent)
+            if !additive_systems.is_empty() {
+                let mut particle_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Additive Particle Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                for ps in additive_systems {
+                    ps.render(&mut particle_pass, &self.camera_bind_group);
+                }
+            }
+        }
+
         // Copy scene to bloom input texture (so we can read from it while writing to scene)
         encoder.copy_texture_to_texture(
             wgpu::ImageCopyTexture {
@@ -1859,10 +2013,23 @@ impl RenApp {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate depth copy texture for particle soft-fade
+            self.depth_copy_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Depth Copy Texture"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.depth_copy_view = self.depth_copy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Recreate scene texture for post-processing (HDR format)
             self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -4060,6 +4227,212 @@ impl RenApp {
 
         self.meshes.push(mesh);
         Ok(())
+    }
+
+    // ==================== Particle System API ====================
+
+    /// Create a new particle system from a preset.
+    /// Returns the particle system ID.
+    /// Presets: "fire", "smoke", "sparks", "debris", "magic"
+    #[wasm_bindgen]
+    pub fn create_particle_system(&mut self, preset: &str) -> u32 {
+        use crate::particles::{ParticlePreset, ParticleSystem};
+
+        let preset_type = match preset.to_lowercase().as_str() {
+            "fire" => ParticlePreset::Fire,
+            "smoke" => ParticlePreset::Smoke,
+            "sparks" => ParticlePreset::Sparks,
+            "debris" => ParticlePreset::Debris,
+            "magic" | "energy" => ParticlePreset::MagicEnergy,
+            _ => ParticlePreset::Fire, // Default to fire
+        };
+
+        let mut ps = ParticleSystem::from_preset(preset_type);
+
+        // Get camera bind group layout from material
+        let camera_layout = self.material.camera_bind_group_layout()
+            .expect("Camera bind group layout not initialized");
+
+        // Initialize the particle system
+        // Use depth_copy_view (not depth_view) because we can't read and write same texture
+        ps.init(
+            &self.device,
+            &self.queue,
+            self.hdr_format,
+            camera_layout,
+            self.white_texture.view(),
+            &self.depth_copy_view,
+            &self.particle_sampler,
+        );
+
+        // Add preset-specific forces for more realistic behavior
+        match preset_type {
+            ParticlePreset::Fire => {
+                // Add turbulence for flickering flames
+                ps.add_force(crate::particles::ForceType::Turbulence {
+                    frequency: 3.0,
+                    amplitude: 1.2,
+                    octaves: 2,
+                });
+                // Slight upward thermal lift
+                ps.add_force(crate::particles::ForceType::Directional {
+                    direction: [0.0, 1.0, 0.0],
+                    strength: 0.8,
+                });
+            }
+            ParticlePreset::Smoke => {
+                // Gentle turbulence for billowing
+                ps.add_force(crate::particles::ForceType::Turbulence {
+                    frequency: 1.0,
+                    amplitude: 0.5,
+                    octaves: 2,
+                });
+            }
+            ParticlePreset::Sparks => {
+                // Gravity for sparks
+                ps.add_force(crate::particles::ForceType::Directional {
+                    direction: [0.0, -1.0, 0.0],
+                    strength: 4.0,
+                });
+            }
+            ParticlePreset::Debris => {
+                // Strong gravity for debris
+                ps.add_force(crate::particles::ForceType::Directional {
+                    direction: [0.0, -1.0, 0.0],
+                    strength: 9.8,
+                });
+            }
+            _ => {}
+        }
+
+        let id = self.particle_systems.len() as u32;
+        self.particle_systems.push(ps);
+        id
+    }
+
+    /// Set particle system position.
+    #[wasm_bindgen]
+    pub fn set_particle_position(&mut self, id: u32, x: f32, y: f32, z: f32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.set_position(x, y, z);
+        }
+    }
+
+    /// Get number of particle systems.
+    #[wasm_bindgen]
+    pub fn particle_system_count(&self) -> u32 {
+        self.particle_systems.len() as u32
+    }
+
+    /// Set particle system visibility.
+    #[wasm_bindgen]
+    pub fn set_particle_visible(&mut self, id: u32, visible: bool) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.visible = visible;
+        }
+    }
+
+    /// Play a particle system.
+    #[wasm_bindgen]
+    pub fn play_particle_system(&mut self, id: u32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.play();
+        }
+    }
+
+    /// Pause a particle system.
+    #[wasm_bindgen]
+    pub fn pause_particle_system(&mut self, id: u32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.pause();
+        }
+    }
+
+    /// Stop and reset a particle system.
+    #[wasm_bindgen]
+    pub fn stop_particle_system(&mut self, id: u32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.stop(&self.queue);
+        }
+    }
+
+    /// Emit a burst of particles.
+    #[wasm_bindgen]
+    pub fn particle_burst(&mut self, id: u32, count: u32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.burst(count);
+        }
+    }
+
+    /// Add gravity force to a particle system.
+    #[wasm_bindgen]
+    pub fn add_particle_gravity(&mut self, id: u32, strength: f32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.add_force(crate::particles::ForceType::Directional {
+                direction: [0.0, -1.0, 0.0],
+                strength,
+            });
+        }
+    }
+
+    /// Add wind force to a particle system.
+    #[wasm_bindgen]
+    pub fn add_particle_wind(&mut self, id: u32, x: f32, y: f32, z: f32, strength: f32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            let len = (x * x + y * y + z * z).sqrt();
+            let dir = if len > 0.0 { [x / len, y / len, z / len] } else { [1.0, 0.0, 0.0] };
+            ps.add_force(crate::particles::ForceType::Directional {
+                direction: dir,
+                strength,
+            });
+        }
+    }
+
+    /// Add turbulence force to a particle system.
+    #[wasm_bindgen]
+    pub fn add_particle_turbulence(&mut self, id: u32, frequency: f32, amplitude: f32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.add_force(crate::particles::ForceType::Turbulence {
+                frequency,
+                amplitude,
+                octaves: 2,
+            });
+        }
+    }
+
+    /// Add attractor force to a particle system.
+    #[wasm_bindgen]
+    pub fn add_particle_attractor(&mut self, id: u32, x: f32, y: f32, z: f32, strength: f32, radius: f32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.add_force(crate::particles::ForceType::Point {
+                position: [x, y, z],
+                strength,
+                radius,
+            });
+        }
+    }
+
+    /// Clear all forces from a particle system.
+    #[wasm_bindgen]
+    pub fn clear_particle_forces(&mut self, id: u32) {
+        if let Some(ps) = self.particle_systems.get_mut(id as usize) {
+            ps.clear_forces();
+        }
+    }
+
+    /// Remove a particle system.
+    #[wasm_bindgen]
+    pub fn remove_particle_system(&mut self, id: u32) {
+        let idx = id as usize;
+        if idx < self.particle_systems.len() {
+            self.particle_systems.remove(idx);
+        }
+    }
+
+    /// Remove all particle systems.
+    #[wasm_bindgen]
+    pub fn clear_particle_systems(&mut self) {
+        self.particle_systems.clear();
     }
 }
 

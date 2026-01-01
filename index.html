@@ -968,6 +968,29 @@
             </div>
             <hr class="divider">
             <div class="section">
+                <h3>Particles</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">GPU-accelerated particle effects.</p>
+                <div style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
+                    <button id="particle-fire" style="flex: 1; min-width: 60px; padding: 5px; background: #a33; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Fire</button>
+                    <button id="particle-smoke" style="flex: 1; min-width: 60px; padding: 5px; background: #555; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Smoke</button>
+                    <button id="particle-sparks" style="flex: 1; min-width: 60px; padding: 5px; background: #a83; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Sparks</button>
+                </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
+                    <button id="particle-magic" style="flex: 1; min-width: 60px; padding: 5px; background: #63a; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Magic</button>
+                    <button id="particle-debris" style="flex: 1; min-width: 60px; padding: 5px; background: #654; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Debris</button>
+                    <button id="particle-clear" style="flex: 1; min-width: 60px; padding: 5px; background: #333; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Clear All</button>
+                </div>
+                <label>
+                    <input type="checkbox" id="particle-gravity" checked>
+                    Gravity
+                </label>
+                <label>
+                    <input type="checkbox" id="particle-turbulence">
+                    Turbulence
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
                 <h3>IBL (Environment Lighting)</h3>
                 <label>
                     Diffuse
@@ -2112,6 +2135,52 @@
                     if (app.set_volumetric_fog_god_ray_intensity) app.set_volumetric_fog_god_ray_intensity(val);
                     document.getElementById('fog-godray-intensity-val').textContent = val.toFixed(1);
                     saveSettings();
+                });
+
+                // Particle system controls
+                let activeParticleSystems = [];
+                const particleGravity = document.getElementById('particle-gravity');
+                const particleTurbulence = document.getElementById('particle-turbulence');
+
+                function createParticleEffect(type) {
+                    if (!app.create_particle_system) return;
+
+                    const id = app.create_particle_system(type);
+                    activeParticleSystems.push(id);
+
+                    // Position at origin or slightly above ground
+                    app.set_particle_position(id, 0, 0.5, 0);
+
+                    // Add forces based on checkboxes
+                    if (particleGravity.checked) {
+                        app.add_particle_gravity(id, 3.0);
+                    }
+                    if (particleTurbulence.checked) {
+                        app.add_particle_turbulence(id, 1.5, 1.0);
+                    }
+
+                    console.log(`Created ${type} particle system with ID ${id}`);
+                }
+
+                document.getElementById('particle-fire').addEventListener('click', () => createParticleEffect('fire'));
+                document.getElementById('particle-smoke').addEventListener('click', () => createParticleEffect('smoke'));
+                document.getElementById('particle-sparks').addEventListener('click', () => createParticleEffect('sparks'));
+                document.getElementById('particle-magic').addEventListener('click', () => createParticleEffect('magic'));
+                document.getElementById('particle-debris').addEventListener('click', () => {
+                    if (!app.create_particle_system) return;
+                    const id = app.create_particle_system('debris');
+                    activeParticleSystems.push(id);
+                    app.set_particle_position(id, 0, 2, 0);
+                    app.add_particle_gravity(id, 9.81);
+                    app.particle_burst(id, 50);
+                    console.log(`Created debris burst with ID ${id}`);
+                });
+                document.getElementById('particle-clear').addEventListener('click', () => {
+                    if (app.clear_particle_systems) {
+                        app.clear_particle_systems();
+                        activeParticleSystems = [];
+                        console.log('Cleared all particle systems');
+                    }
                 });
 
                 // IBL controls

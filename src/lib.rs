@@ -54,6 +54,7 @@ pub mod loaders;
 pub mod postprocessing;
 pub mod ibl;
 pub mod illumination;
+pub mod particles;
 
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub mod web;
@@ -78,6 +79,7 @@ pub mod prelude {
     pub use crate::loaders::*;
     pub use crate::postprocessing::*;
     pub use crate::ibl::*;
+    pub use crate::particles::*;
 }
 
 /// Initialize the engine for WASM environments.
