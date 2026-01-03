@@ -207,6 +207,9 @@
     <div id="controls">
         <label for="model-input">Load Model</label>
         <input type="file" id="model-input" accept=".glb,.gltf,.obj">
+        <label for="nanite-input" style="background: rgba(200, 80, 60, 0.8);">Load as Nanite</label>
+        <input type="file" id="nanite-input" accept=".glb,.gltf">
+        <button id="nanite-demo-btn" style="background: rgba(200, 80, 60, 0.8);">Nanite Demo Cube</button>
         <button id="clear-btn">Clear Models</button>
         <button id="demo-btn">Add Demo</button>
     </div>
@@ -214,9 +217,11 @@
     <div id="panel">
         <div class="tabs">
             <button class="tab active" data-tab="lighting">Lighting</button>
+            <button class="tab" data-tab="material">Material</button>
             <button class="tab" data-tab="effects">Effects</button>
             <button class="tab" data-tab="aa">AA</button>
             <button class="tab" data-tab="scene">Scene</button>
+            <button class="tab" data-tab="gizmo">Gizmo</button>
         </div>
 
         <!-- Lighting Tab -->
@@ -266,13 +271,13 @@
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="bloom-intensity" min="0" max="2" step="0.1" value="0.8">
-                    <span class="value" id="bloom-intensity-val">0.8</span>
+                    <input type="range" id="bloom-intensity" min="0" max="2" step="0.1" value="0.3">
+                    <span class="value" id="bloom-intensity-val">0.3</span>
                 </label>
                 <label>
                     Threshold
-                    <input type="range" id="bloom-threshold" min="0" max="1" step="0.05" value="0.6">
-                    <span class="value" id="bloom-threshold-val">0.6</span>
+                    <input type="range" id="bloom-threshold" min="0" max="1" step="0.05" value="0.85">
+                    <span class="value" id="bloom-threshold-val">0.85</span>
                 </label>
             </div>
             <hr class="divider">
@@ -291,15 +296,15 @@
                 </label>
                 <label>
                     Exposure
-                    <input type="range" id="exposure" min="0.5" max="3" step="0.1" value="1.5">
-                    <span class="value" id="exposure-val">1.5</span>
+                    <input type="range" id="exposure" min="0.5" max="3" step="0.1" value="1.2">
+                    <span class="value" id="exposure-val">1.2</span>
                 </label>
             </div>
             <hr class="divider">
             <div class="section">
                 <h3>Auto-Exposure</h3>
                 <label>
-                    <input type="checkbox" id="auto-exposure-enabled">
+                    <input type="checkbox" id="auto-exposure-enabled" checked>
                     Eye Adaptation
                 </label>
                 <label>
@@ -337,25 +342,25 @@
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="vignette-intensity" min="0" max="1" step="0.05" value="0.3">
-                    <span class="value" id="vignette-intensity-val">0.3</span>
+                    <input type="range" id="vignette-intensity" min="0" max="1" step="0.05" value="0.15">
+                    <span class="value" id="vignette-intensity-val">0.15</span>
                 </label>
                 <label>
                     Smoothness
-                    <input type="range" id="vignette-smoothness" min="0.1" max="1.5" step="0.05" value="0.5">
-                    <span class="value" id="vignette-smoothness-val">0.5</span>
+                    <input type="range" id="vignette-smoothness" min="0.1" max="1.5" step="0.05" value="0.7">
+                    <span class="value" id="vignette-smoothness-val">0.7</span>
                 </label>
                 <label>
                     Roundness
-                    <input type="range" id="vignette-roundness" min="0" max="1" step="0.1" value="1.0">
-                    <span class="value" id="vignette-roundness-val">1.0</span>
+                    <input type="range" id="vignette-roundness" min="0" max="1" step="0.1" value="0.8">
+                    <span class="value" id="vignette-roundness-val">0.8</span>
                 </label>
             </div>
             <hr class="divider">
             <div class="section">
                 <h3>Color Correction</h3>
                 <label>
-                    <input type="checkbox" id="cc-enabled">
+                    <input type="checkbox" id="cc-enabled" checked>
                     Enable
                 </label>
                 <label>
@@ -365,13 +370,13 @@
                 </label>
                 <label>
                     Contrast
-                    <input type="range" id="cc-contrast" min="0" max="2" step="0.05" value="1">
-                    <span class="value" id="cc-contrast-val">1.00</span>
+                    <input type="range" id="cc-contrast" min="0" max="2" step="0.05" value="1.05">
+                    <span class="value" id="cc-contrast-val">1.05</span>
                 </label>
                 <label>
                     Saturation
-                    <input type="range" id="cc-saturation" min="0" max="2" step="0.05" value="1">
-                    <span class="value" id="cc-saturation-val">1.00</span>
+                    <input type="range" id="cc-saturation" min="0" max="2" step="0.05" value="1.05">
+                    <span class="value" id="cc-saturation-val">1.05</span>
                 </label>
                 <label>
                     Gamma
@@ -394,21 +399,21 @@
             <div class="section">
                 <h3>Hemisphere Light</h3>
                 <label>
-                    <input type="checkbox" id="hemisphere-enabled">
+                    <input type="checkbox" id="hemisphere-enabled" checked>
                     Enable
                 </label>
                 <label>
                     Sky Color
-                    <input type="color" id="hemisphere-sky-color" value="#99bfff">
+                    <input type="color" id="hemisphere-sky-color" value="#b4d4f0">
                 </label>
                 <label>
                     Ground Color
-                    <input type="color" id="hemisphere-ground-color" value="#664d33">
+                    <input type="color" id="hemisphere-ground-color" value="#4a3d2d">
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="hemisphere-intensity" min="0" max="2" step="0.1" value="1.0">
-                    <span class="value" id="hemisphere-intensity-val">1.0</span>
+                    <input type="range" id="hemisphere-intensity" min="0" max="2" step="0.1" value="0.4">
+                    <span class="value" id="hemisphere-intensity-val">0.4</span>
                 </label>
             </div>
             <hr class="divider">
@@ -515,38 +520,38 @@
                     <select id="shadow-pcf">
                         <option value="0">None</option>
                         <option value="1">2x2</option>
-                        <option value="2" selected>3x3</option>
+                        <option value="2">3x3</option>
                         <option value="3">5x5</option>
                         <option value="4">Poisson</option>
-                        <option value="5">PCSS (Soft)</option>
+                        <option value="5" selected>PCSS (Soft)</option>
                     </select>
                 </label>
                 <label>
                     Bias
-                    <input type="range" id="shadow-bias" min="0.001" max="0.02" step="0.001" value="0.005">
-                    <span class="value" id="shadow-bias-val">0.005</span>
+                    <input type="range" id="shadow-bias" min="0.001" max="0.02" step="0.001" value="0.003">
+                    <span class="value" id="shadow-bias-val">0.003</span>
                 </label>
                 <label>
                     Normal Bias
-                    <input type="range" id="shadow-normal-bias" min="0" max="0.1" step="0.005" value="0.02">
-                    <span class="value" id="shadow-normal-bias-val">0.02</span>
+                    <input type="range" id="shadow-normal-bias" min="0" max="0.1" step="0.005" value="0.015">
+                    <span class="value" id="shadow-normal-bias-val">0.015</span>
                 </label>
-                <div id="pcss-controls" style="display: none;">
+                <div id="pcss-controls">
                     <label>
                         PCSS Light Size
-                        <input type="range" id="pcss-light-size" min="0.1" max="5.0" step="0.1" value="0.5">
-                        <span class="value" id="pcss-light-size-val">0.5</span>
+                        <input type="range" id="pcss-light-size" min="0.1" max="5.0" step="0.1" value="1.0">
+                        <span class="value" id="pcss-light-size-val">1.0</span>
                     </label>
                     <label>
                         PCSS Max Radius
-                        <input type="range" id="pcss-max-radius" min="1" max="30" step="1" value="10">
-                        <span class="value" id="pcss-max-radius-val">10</span>
+                        <input type="range" id="pcss-max-radius" min="1" max="30" step="1" value="15">
+                        <span class="value" id="pcss-max-radius-val">15</span>
                     </label>
                 </div>
                 <div class="subsection">
                     <h4>Contact Shadows</h4>
                     <label class="toggle">
-                        <input type="checkbox" id="contact-shadows-enabled">
+                        <input type="checkbox" id="contact-shadows-enabled" checked>
                         Enable Contact Shadows
                     </label>
                     <div id="contact-shadow-controls">
@@ -619,6 +624,52 @@
             </div>
         </div>
 
+        <!-- Material Tab -->
+        <div class="tab-content" id="tab-material">
+            <div class="section">
+                <h3>Clear Coat</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Adds a glossy clear coat layer on top of the base material (car paint, lacquer).</p>
+                <label>
+                    Clear Coat
+                    <input type="range" id="clear-coat" min="0" max="1" step="0.05" value="0">
+                    <span class="value" id="clear-coat-val">0.00</span>
+                </label>
+                <label>
+                    Clear Coat Roughness
+                    <input type="range" id="clear-coat-roughness" min="0" max="0.5" step="0.01" value="0.03">
+                    <span class="value" id="clear-coat-roughness-val">0.03</span>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Cloth / Sheen</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Adds soft, fuzzy highlights for fabric and velvet-like materials.</p>
+                <label>
+                    Sheen
+                    <input type="range" id="sheen" min="0" max="1" step="0.05" value="0">
+                    <span class="value" id="sheen-val">0.00</span>
+                </label>
+                <label>
+                    Sheen Color
+                    <input type="color" id="sheen-color" value="#ffffff">
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Base Material</h3>
+                <label>
+                    Metallic
+                    <input type="range" id="base-metallic" min="0" max="1" step="0.05" value="0">
+                    <span class="value" id="base-metallic-val">0.00</span>
+                </label>
+                <label>
+                    Roughness
+                    <input type="range" id="base-roughness" min="0.04" max="1" step="0.02" value="0.4">
+                    <span class="value" id="base-roughness-val">0.40</span>
+                </label>
+            </div>
+        </div>
+
         <!-- Effects Tab -->
         <div class="tab-content" id="tab-effects">
             <div class="section">
@@ -666,32 +717,32 @@
             <div class="section">
                 <h3>SSR (Reflections)</h3>
                 <label>
-                    <input type="checkbox" id="ssr-enabled">
+                    <input type="checkbox" id="ssr-enabled" checked>
                     Enable
                 </label>
                 <label>
                     Quality
                     <select id="ssr-quality">
                         <option value="0">Low</option>
-                        <option value="1" selected>Medium</option>
-                        <option value="2">High</option>
+                        <option value="1">Medium</option>
+                        <option value="2" selected>High</option>
                         <option value="3">Ultra</option>
                     </select>
                 </label>
                 <label>
                     Max Dist
-                    <input type="range" id="ssr-max-distance" min="5" max="50" step="1" value="20">
-                    <span class="value" id="ssr-max-distance-val">20</span>
+                    <input type="range" id="ssr-max-distance" min="5" max="50" step="1" value="30">
+                    <span class="value" id="ssr-max-distance-val">30</span>
                 </label>
                 <label>
                     Thickness
-                    <input type="range" id="ssr-thickness" min="0.01" max="1" step="0.01" value="0.1">
-                    <span class="value" id="ssr-thickness-val">0.10</span>
+                    <input type="range" id="ssr-thickness" min="0.01" max="1" step="0.01" value="0.15">
+                    <span class="value" id="ssr-thickness-val">0.15</span>
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="ssr-intensity" min="0" max="1" step="0.05" value="0.5">
-                    <span class="value" id="ssr-intensity-val">0.50</span>
+                    <input type="range" id="ssr-intensity" min="0" max="1" step="0.05" value="0.8">
+                    <span class="value" id="ssr-intensity-val">0.80</span>
                 </label>
             </div>
             <hr class="divider">
@@ -770,13 +821,13 @@
                     Mode
                     <select id="aa-mode">
                         <option value="0">None</option>
-                        <option value="1" selected>FXAA</option>
+                        <option value="1">FXAA</option>
                         <option value="2">SMAA</option>
-                        <option value="3">TAA</option>
+                        <option value="3" selected>TAA</option>
                     </select>
                 </label>
             </div>
-            <div id="fxaa-options" class="section">
+            <div id="fxaa-options" class="section" style="display: none;">
                 <h3>FXAA Options</h3>
                 <label>
                     Quality
@@ -799,17 +850,17 @@
                     </select>
                 </label>
             </div>
-            <div id="taa-options" class="section" style="display: none;">
+            <div id="taa-options" class="section">
                 <h3>TAA Options</h3>
                 <label>
                     Blend
-                    <input type="range" id="taa-blend" min="0.5" max="0.98" step="0.02" value="0.9">
-                    <span class="value" id="taa-blend-val">0.9</span>
+                    <input type="range" id="taa-blend" min="0.5" max="0.98" step="0.02" value="0.92">
+                    <span class="value" id="taa-blend-val">0.92</span>
                 </label>
                 <label>
                     Sharpness
-                    <input type="range" id="taa-sharpness" min="0" max="1" step="0.1" value="0.2">
-                    <span class="value" id="taa-sharpness-val">0.2</span>
+                    <input type="range" id="taa-sharpness" min="0" max="1" step="0.1" value="0.3">
+                    <span class="value" id="taa-sharpness-val">0.3</span>
                 </label>
             </div>
         </div>
@@ -819,32 +870,32 @@
             <div class="section">
                 <h3>SSAO</h3>
                 <label>
-                    <input type="checkbox" id="ssao-enabled" checked>
+                    <input type="checkbox" id="ssao-enabled">
                     Enable
                 </label>
                 <label>
                     Quality
                     <select id="ssao-quality">
                         <option value="0">Low</option>
-                        <option value="1" selected>Medium</option>
-                        <option value="2">High</option>
+                        <option value="1">Medium</option>
+                        <option value="2" selected>High</option>
                         <option value="3">Ultra</option>
                     </select>
                 </label>
                 <label>
                     Radius
-                    <input type="range" id="ssao-radius" min="0.1" max="2" step="0.1" value="0.5">
-                    <span class="value" id="ssao-radius-val">0.5</span>
+                    <input type="range" id="ssao-radius" min="0.1" max="2" step="0.1" value="0.4">
+                    <span class="value" id="ssao-radius-val">0.4</span>
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="ssao-intensity" min="0" max="3" step="0.1" value="1.0">
-                    <span class="value" id="ssao-intensity-val">1.0</span>
+                    <input type="range" id="ssao-intensity" min="0" max="3" step="0.1" value="1.2">
+                    <span class="value" id="ssao-intensity-val">1.2</span>
                 </label>
                 <label>
                     Bias
-                    <input type="range" id="ssao-bias" min="0" max="0.1" step="0.005" value="0.025">
-                    <span class="value" id="ssao-bias-val">0.025</span>
+                    <input type="range" id="ssao-bias" min="0" max="0.1" step="0.005" value="0.02">
+                    <span class="value" id="ssao-bias-val">0.02</span>
                 </label>
                 <button id="ssao-reset" style="margin-top: 5px; padding: 5px 10px; background: #444; border: none; color: #fff; border-radius: 3px; cursor: pointer;">Reset SSAO</button>
             </div>
@@ -853,37 +904,37 @@
                 <h3>GTAO (Ground Truth AO)</h3>
                 <p style="font-size: 11px; color: #888; margin-bottom: 8px;">More accurate than SSAO. Enabling disables SSAO.</p>
                 <label>
-                    <input type="checkbox" id="gtao-enabled">
+                    <input type="checkbox" id="gtao-enabled" checked>
                     Enable
                 </label>
                 <label>
                     Quality
                     <select id="gtao-quality">
                         <option value="0">Low</option>
-                        <option value="1" selected>Medium</option>
-                        <option value="2">High</option>
+                        <option value="1">Medium</option>
+                        <option value="2" selected>High</option>
                         <option value="3">Ultra</option>
                     </select>
                 </label>
                 <label>
                     Radius
-                    <input type="range" id="gtao-radius" min="0.1" max="2" step="0.1" value="0.5">
-                    <span class="value" id="gtao-radius-val">0.5</span>
+                    <input type="range" id="gtao-radius" min="0.1" max="2" step="0.1" value="0.4">
+                    <span class="value" id="gtao-radius-val">0.4</span>
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="gtao-intensity" min="0.5" max="3" step="0.1" value="1.5">
-                    <span class="value" id="gtao-intensity-val">1.5</span>
+                    <input type="range" id="gtao-intensity" min="0.5" max="3" step="0.1" value="1.2">
+                    <span class="value" id="gtao-intensity-val">1.2</span>
                 </label>
                 <label>
                     Power
-                    <input type="range" id="gtao-power" min="0.5" max="4" step="0.1" value="1.5">
-                    <span class="value" id="gtao-power-val">1.5</span>
+                    <input type="range" id="gtao-power" min="0.5" max="4" step="0.1" value="1.2">
+                    <span class="value" id="gtao-power-val">1.2</span>
                 </label>
                 <label>
                     Falloff
-                    <input type="range" id="gtao-falloff" min="0" max="1" step="0.05" value="0.2">
-                    <span class="value" id="gtao-falloff-val">0.2</span>
+                    <input type="range" id="gtao-falloff" min="0" max="1" step="0.05" value="0.15">
+                    <span class="value" id="gtao-falloff-val">0.15</span>
                 </label>
             </div>
             <hr class="divider">
@@ -891,32 +942,32 @@
                 <h3>Lumen GI (Global Illumination)</h3>
                 <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Screen-space global illumination for indirect lighting.</p>
                 <label>
-                    <input type="checkbox" id="lumen-enabled">
+                    <input type="checkbox" id="lumen-enabled" checked>
                     Enable
                 </label>
                 <label>
                     Quality
                     <select id="lumen-quality">
                         <option value="0">Low</option>
-                        <option value="1" selected>Medium</option>
-                        <option value="2">High</option>
+                        <option value="1">Medium</option>
+                        <option value="2" selected>High</option>
                         <option value="3">Ultra</option>
                     </select>
                 </label>
                 <label>
                     Intensity
-                    <input type="range" id="lumen-intensity" min="0" max="3" step="0.1" value="1.0">
-                    <span class="value" id="lumen-intensity-val">1.0</span>
+                    <input type="range" id="lumen-intensity" min="0" max="3" step="0.1" value="0.8">
+                    <span class="value" id="lumen-intensity-val">0.8</span>
                 </label>
                 <label>
                     Max Distance
-                    <input type="range" id="lumen-distance" min="1" max="20" step="0.5" value="5.0">
-                    <span class="value" id="lumen-distance-val">5.0</span>
+                    <input type="range" id="lumen-distance" min="1" max="20" step="0.5" value="8.0">
+                    <span class="value" id="lumen-distance-val">8.0</span>
                 </label>
                 <label>
                     Thickness
-                    <input type="range" id="lumen-thickness" min="0.01" max="0.5" step="0.01" value="0.1">
-                    <span class="value" id="lumen-thickness-val">0.10</span>
+                    <input type="range" id="lumen-thickness" min="0.01" max="0.5" step="0.01" value="0.15">
+                    <span class="value" id="lumen-thickness-val">0.15</span>
                 </label>
             </div>
             <hr class="divider">
@@ -1026,6 +1077,30 @@
                     <input type="range" id="detail-max-distance" min="1" max="50" step="1" value="5">
                     <span class="value" id="detail-max-distance-val">5</span>
                 </label>
+                <div style="margin-top: 10px; border-top: 1px solid #555; padding-top: 10px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="detail-albedo-enabled">
+                        Enable Detail Albedo
+                    </label>
+                    <label>
+                        Albedo Scale
+                        <input type="range" id="detail-albedo-scale" min="1" max="50" step="1" value="10">
+                        <span class="value" id="detail-albedo-scale-val">10</span>
+                    </label>
+                    <label>
+                        Albedo Intensity
+                        <input type="range" id="detail-albedo-intensity" min="0" max="1" step="0.05" value="0.3">
+                        <span class="value" id="detail-albedo-intensity-val">0.3</span>
+                    </label>
+                    <label>
+                        Blend Mode
+                        <select id="detail-albedo-blend-mode">
+                            <option value="0" selected>Overlay</option>
+                            <option value="1">Multiply</option>
+                            <option value="2">Soft Light</option>
+                        </select>
+                    </label>
+                </div>
             </div>
             <hr class="divider">
             <div class="section">
@@ -1078,6 +1153,51 @@
                     <input type="checkbox" id="show-axes" checked>
                     Show Axes
                 </label>
+            </div>
+        </div>
+
+        <!-- Gizmo Tab -->
+        <div class="tab-content" id="tab-gizmo">
+            <div class="section">
+                <h3>Transform Gizmo</h3>
+                <p style="font-size: 11px; color: #888; margin-bottom: 8px;">Interactive object manipulation tool.</p>
+                <label>
+                    <input type="checkbox" id="gizmo-enabled">
+                    Enable Gizmo
+                </label>
+                <label>
+                    Mode
+                    <select id="gizmo-mode">
+                        <option value="0" selected>Translate</option>
+                        <option value="1">Rotate</option>
+                        <option value="2">Scale</option>
+                    </select>
+                </label>
+                <label>
+                    Target Mesh
+                    <select id="gizmo-target">
+                        <option value="-1" selected>None</option>
+                    </select>
+                </label>
+            </div>
+            <hr class="divider">
+            <div class="section">
+                <h3>Instructions</h3>
+                <p style="font-size: 11px; color: #aaa; line-height: 1.5;">
+                    <b>Usage:</b><br>
+                    1. Load a model (GLB/OBJ)<br>
+                    2. Enable gizmo and select a mesh<br>
+                    3. Click and drag gizmo axes<br><br>
+                    <b>Keyboard Shortcuts:</b><br>
+                    W - Translate mode<br>
+                    E - Rotate mode<br>
+                    R - Scale mode<br><br>
+                    <b>Colors:</b><br>
+                    Red = X axis<br>
+                    Green = Y axis<br>
+                    Blue = Z axis<br>
+                    Yellow = Hovered/Active
+                </p>
             </div>
         </div>
     </div>
@@ -1148,16 +1268,20 @@
                         updateSunFromTime(dayNightTime);
                     }
 
-                    // Handle keyboard movement (WASD + QE)
-                    let forward = 0, right = 0, up = 0;
-                    if (keysPressed['KeyW']) forward += 1;
-                    if (keysPressed['KeyS']) forward -= 1;
-                    if (keysPressed['KeyA']) right -= 1;
-                    if (keysPressed['KeyD']) right += 1;
-                    if (keysPressed['KeyE']) up += 1;
-                    if (keysPressed['KeyQ']) up -= 1;
-                    if (forward !== 0 || right !== 0 || up !== 0) {
-                        app.on_keyboard_move(forward, right, up);
+                    // Handle keyboard movement (WASD + QE) - only when RMB held
+                    if (isFreelooking) {
+                        let forward = 0, right = 0, up = 0;
+                        if (keysPressed['KeyW']) forward += 1;
+                        if (keysPressed['KeyS']) forward -= 1;
+                        if (keysPressed['KeyA']) right -= 1;
+                        if (keysPressed['KeyD']) right += 1;
+                        if (keysPressed['KeyE']) up += 1;
+                        if (keysPressed['KeyQ']) up -= 1;
+                        if (forward !== 0 || right !== 0 || up !== 0) {
+                            // Shift = speed boost (3x faster)
+                            const speedMultiplier = keysPressed['ShiftLeft'] || keysPressed['ShiftRight'] ? 3.0 : 1.0;
+                            app.on_keyboard_move(forward * speedMultiplier, right * speedMultiplier, up * speedMultiplier);
+                        }
                     }
 
                     app.frame();
@@ -1170,10 +1294,12 @@
                         lastTime = now;
 
                         const stats = app.stats();
+                        const naniteClusters = app.nanite_cluster_count();
                         statsEl.innerHTML = `
                             FPS: ${fps}<br>
                             Draw Calls: ${stats.draw_calls}<br>
                             Triangles: ${stats.triangles}<br>
+                            Nanite Clusters: ${naniteClusters}<br>
                             Frame: ${stats.frame}
                         `;
                     }
@@ -1188,29 +1314,56 @@
                 });
 
                 // Mouse controls
-                let isDragging = false;
-                let isPanning = false;
+                // RMB + drag = Look around (freelook)
+                // RMB + WASD/QE = Fly through scene
+                // MMB + drag = Pan
+                // Alt + LMB + drag = Orbit around point
+                // Scroll = Dolly forward/backward
+                // Shift = Speed boost
+                let isFreelooking = false;   // RMB held - enables look + WASD movement
+                let isGliding = false;       // LMB - horizontal glide
+                let isPanning = false;       // MMB - pan
+                let isGizmoDragging = false;
                 let lastMouseX = 0;
                 let lastMouseY = 0;
 
                 canvas.addEventListener('mousedown', (e) => {
-                    if (e.button === 0) {
-                        if (e.shiftKey) {
-                            isPanning = true;
-                        } else {
-                            isDragging = true;
+                    // Check gizmo first if enabled
+                    if (e.button === 0 && !e.altKey && app.is_gizmo_enabled && app.is_gizmo_enabled()) {
+                        if (app.on_gizmo_drag_start && app.on_gizmo_drag_start(e.clientX, e.clientY)) {
+                            isGizmoDragging = true;
+                            e.preventDefault();
+                            return;
                         }
-                    } else if (e.button === 2) {
+                    }
+
+                    if (e.button === 0) {
+                        // Left mouse button = horizontal glide
+                        isGliding = true;
+                    } else if (e.button === 1) {
+                        // Middle mouse button = pan
                         isPanning = true;
+                    } else if (e.button === 2) {
+                        // Right mouse button = freelook mode (enables WASD)
+                        isFreelooking = true;
                     }
                     lastMouseX = e.clientX;
                     lastMouseY = e.clientY;
                     e.preventDefault();
                 });
 
-                window.addEventListener('mouseup', () => {
-                    isDragging = false;
-                    isPanning = false;
+                window.addEventListener('mouseup', (e) => {
+                    if (isGizmoDragging) {
+                        if (app.on_gizmo_drag_end) app.on_gizmo_drag_end();
+                        isGizmoDragging = false;
+                    }
+                    if (e.button === 0) {
+                        isGliding = false;
+                    } else if (e.button === 1) {
+                        isPanning = false;
+                    } else if (e.button === 2) {
+                        isFreelooking = false;
+                    }
                 });
 
                 window.addEventListener('mousemove', (e) => {
@@ -1219,14 +1372,25 @@
                     lastMouseX = e.clientX;
                     lastMouseY = e.clientY;
 
-                    if (isDragging) {
-                        app.on_mouse_drag(deltaX, deltaY);
+                    if (isGizmoDragging) {
+                        if (app.on_gizmo_drag) app.on_gizmo_drag(e.clientX, e.clientY);
+                    } else if (isFreelooking) {
+                        // RMB drag = freelook (rotate camera view direction in place)
+                        if (app.on_mouse_freelook) app.on_mouse_freelook(deltaX, deltaY);
+                    } else if (isGliding) {
+                        // LMB = horizontal glide at same height
+                        if (app.on_mouse_glide) app.on_mouse_glide(deltaX, deltaY);
                     } else if (isPanning) {
+                        // MMB = pan
                         app.on_mouse_pan(deltaX, deltaY);
+                    } else if (app.is_gizmo_enabled && app.is_gizmo_enabled()) {
+                        // Update gizmo hover state
+                        if (app.on_gizmo_hover) app.on_gizmo_hover(e.clientX, e.clientY);
                     }
                 });
 
                 canvas.addEventListener('wheel', (e) => {
+                    // Scroll wheel = dolly forward/backward
                     app.on_mouse_wheel(e.deltaY);
                     e.preventDefault();
                 }, { passive: false });
@@ -1238,6 +1402,26 @@
                     // Don't capture keys when typing in inputs
                     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
                     keysPressed[e.code] = true;
+
+                    // Gizmo mode shortcuts (only when gizmo is enabled and NOT freelooking)
+                    // Using 1/2/3 instead of W/E/R to avoid conflict with camera controls
+                    if (!isFreelooking && app.is_gizmo_enabled && app.is_gizmo_enabled()) {
+                        if (e.code === 'Digit1') {
+                            if (app.set_gizmo_mode) app.set_gizmo_mode(0); // Translate
+                            document.getElementById('gizmo-mode').value = '0';
+                        } else if (e.code === 'Digit2') {
+                            if (app.set_gizmo_mode) app.set_gizmo_mode(1); // Rotate
+                            document.getElementById('gizmo-mode').value = '1';
+                        } else if (e.code === 'Digit3') {
+                            if (app.set_gizmo_mode) app.set_gizmo_mode(2); // Scale
+                            document.getElementById('gizmo-mode').value = '2';
+                        }
+                    }
+
+                    // F key = Focus on scene center
+                    if (e.code === 'KeyF' && !isFreelooking) {
+                        if (app.focus_on_origin) app.focus_on_origin();
+                    }
                 });
                 window.addEventListener('keyup', (e) => {
                     keysPressed[e.code] = false;
@@ -1264,6 +1448,8 @@
                             const count = app.load_obj(text);
                             console.log(`Loaded ${count} mesh(es) from ${file.name}`);
                         }
+                        // Update gizmo mesh list after loading
+                        if (typeof updateGizmoMeshList === 'function') updateGizmoMeshList();
                     } catch (err) {
                         console.error('Failed to load model:', err);
                         alert('Failed to load model: ' + err);
@@ -1273,13 +1459,47 @@
 
                 clearBtn.addEventListener('click', () => {
                     app.clear_loaded_meshes();
+                    if (app.detach_gizmo) app.detach_gizmo();
+                    if (typeof updateGizmoMeshList === 'function') updateGizmoMeshList();
                     console.log('Cleared loaded models');
+                });
+
+                // Nanite model loading
+                const naniteInput = document.getElementById('nanite-input');
+                naniteInput.addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+
+                    try {
+                        const ext = file.name.split('.').pop().toLowerCase();
+
+                        if (ext === 'glb' || ext === 'gltf') {
+                            const arrayBuffer = await file.arrayBuffer();
+                            const data = new Uint8Array(arrayBuffer);
+                            const count = app.load_gltf_nanite(data);
+                            console.log(`Loaded ${count} mesh(es) as Nanite from ${file.name}`);
+                            console.log(`Total Nanite clusters: ${app.nanite_cluster_count()}`);
+                        } else {
+                            alert('Nanite only supports GLB/GLTF files');
+                        }
+                    } catch (err) {
+                        console.error('Failed to load Nanite model:', err);
+                        alert('Failed to load Nanite model: ' + err);
+                    }
+                    naniteInput.value = '';
                 });
 
                 const demoBtn = document.getElementById('demo-btn');
                 demoBtn.addEventListener('click', () => {
                     app.add_demo_shapes();
                     console.log('Added demo shapes');
+                });
+
+                // Nanite demo cube button
+                const naniteDemoBtn = document.getElementById('nanite-demo-btn');
+                naniteDemoBtn.addEventListener('click', () => {
+                    app.add_nanite_demo_cube();
+                    console.log(`Added Nanite demo cube. Total clusters: ${app.nanite_cluster_count()}`);
                 });
 
                 app.add_demo_shapes();
@@ -2230,6 +2450,108 @@
                     saveSettings();
                 });
 
+                // ============ Detail Albedo ============
+                document.getElementById('detail-albedo-enabled').addEventListener('change', (e) => {
+                    if (app.set_detail_albedo_enabled) app.set_detail_albedo_enabled(e.target.checked);
+                    saveSettings();
+                });
+                document.getElementById('detail-albedo-scale').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_detail_albedo_scale) app.set_detail_albedo_scale(val);
+                    document.getElementById('detail-albedo-scale-val').textContent = val.toFixed(0);
+                    saveSettings();
+                });
+                document.getElementById('detail-albedo-intensity').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_detail_albedo_intensity) app.set_detail_albedo_intensity(val);
+                    document.getElementById('detail-albedo-intensity-val').textContent = val.toFixed(2);
+                    saveSettings();
+                });
+                document.getElementById('detail-albedo-blend-mode').addEventListener('change', (e) => {
+                    const val = parseInt(e.target.value);
+                    if (app.set_detail_albedo_blend_mode) app.set_detail_albedo_blend_mode(val);
+                    saveSettings();
+                });
+
+                // ============ Material Properties ============
+                document.getElementById('clear-coat').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_clear_coat) app.set_clear_coat(val);
+                    document.getElementById('clear-coat-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('clear-coat-roughness').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_clear_coat_roughness) app.set_clear_coat_roughness(val);
+                    document.getElementById('clear-coat-roughness-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('sheen').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_sheen) app.set_sheen(val);
+                    document.getElementById('sheen-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('sheen-color').addEventListener('input', (e) => {
+                    const hex = e.target.value;
+                    const r = parseInt(hex.substr(1, 2), 16) / 255;
+                    const g = parseInt(hex.substr(3, 2), 16) / 255;
+                    const b = parseInt(hex.substr(5, 2), 16) / 255;
+                    if (app.set_sheen_color) app.set_sheen_color(r, g, b);
+                });
+                document.getElementById('base-metallic').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_material_metallic) app.set_material_metallic(val);
+                    document.getElementById('base-metallic-val').textContent = val.toFixed(2);
+                });
+                document.getElementById('base-roughness').addEventListener('input', (e) => {
+                    const val = parseFloat(e.target.value);
+                    if (app.set_material_roughness) app.set_material_roughness(val);
+                    document.getElementById('base-roughness-val').textContent = val.toFixed(2);
+                });
+
+                // ============ Transform Gizmo ============
+                const gizmoEnabledCheckbox = document.getElementById('gizmo-enabled');
+                const gizmoModeSelect = document.getElementById('gizmo-mode');
+                const gizmoTargetSelect = document.getElementById('gizmo-target');
+
+                // Update mesh list when models are loaded
+                function updateGizmoMeshList() {
+                    const count = app.get_mesh_count ? app.get_mesh_count() : 0;
+                    const currentValue = gizmoTargetSelect.value;
+
+                    // Clear and rebuild options
+                    gizmoTargetSelect.innerHTML = '<option value="-1">None</option>';
+                    for (let i = 0; i < count; i++) {
+                        const option = document.createElement('option');
+                        option.value = i.toString();
+                        option.textContent = `Mesh ${i}`;
+                        gizmoTargetSelect.appendChild(option);
+                    }
+
+                    // Restore selection if valid
+                    if (currentValue !== '-1' && parseInt(currentValue) < count) {
+                        gizmoTargetSelect.value = currentValue;
+                    }
+                }
+
+                gizmoEnabledCheckbox.addEventListener('change', (e) => {
+                    if (app.set_gizmo_enabled) app.set_gizmo_enabled(e.target.checked);
+                    if (e.target.checked) {
+                        updateGizmoMeshList();
+                    }
+                });
+
+                gizmoModeSelect.addEventListener('change', (e) => {
+                    if (app.set_gizmo_mode) app.set_gizmo_mode(parseInt(e.target.value));
+                });
+
+                gizmoTargetSelect.addEventListener('change', (e) => {
+                    const index = parseInt(e.target.value);
+                    if (index >= 0) {
+                        if (app.attach_gizmo_to_mesh) app.attach_gizmo_to_mesh(index);
+                    } else {
+                        if (app.detach_gizmo) app.detach_gizmo();
+                    }
+                });
+
                 // ============ Scene Lights ============
                 function setupLightControls(index) {
                     const prefix = `light${index}`;
@@ -2394,6 +2716,11 @@
                         detailScale: document.getElementById('detail-scale').value,
                         detailIntensity: document.getElementById('detail-intensity').value,
                         detailMaxDistance: document.getElementById('detail-max-distance').value,
+                        // Detail Albedo
+                        detailAlbedoEnabled: document.getElementById('detail-albedo-enabled').checked,
+                        detailAlbedoScale: document.getElementById('detail-albedo-scale').value,
+                        detailAlbedoIntensity: document.getElementById('detail-albedo-intensity').value,
+                        detailAlbedoBlendMode: document.getElementById('detail-albedo-blend-mode').value,
                         // AA
                         aaMode: document.getElementById('aa-mode').value,
                         fxaaQuality: document.getElementById('fxaa-quality').value,
@@ -2512,6 +2839,10 @@
                         setVal('detail-scale', s.detailScale, 'detail-scale-val');
                         setVal('detail-intensity', s.detailIntensity, 'detail-intensity-val');
                         setVal('detail-max-distance', s.detailMaxDistance, 'detail-max-distance-val');
+                        setVal('detail-albedo-enabled', s.detailAlbedoEnabled);
+                        setVal('detail-albedo-scale', s.detailAlbedoScale, 'detail-albedo-scale-val');
+                        setVal('detail-albedo-intensity', s.detailAlbedoIntensity, 'detail-albedo-intensity-val');
+                        setVal('detail-albedo-blend-mode', s.detailAlbedoBlendMode);
                         setVal('aa-mode', s.aaMode);
                         setVal('fxaa-quality', s.fxaaQuality);
                         setVal('smaa-quality', s.smaaQuality);
@@ -2602,6 +2933,10 @@
                     if (app.set_detail_scale) app.set_detail_scale(parseFloat(document.getElementById('detail-scale').value));
                     if (app.set_detail_intensity) app.set_detail_intensity(parseFloat(document.getElementById('detail-intensity').value));
                     if (app.set_detail_max_distance) app.set_detail_max_distance(parseFloat(document.getElementById('detail-max-distance').value));
+                    if (app.set_detail_albedo_enabled) app.set_detail_albedo_enabled(document.getElementById('detail-albedo-enabled').checked);
+                    if (app.set_detail_albedo_scale) app.set_detail_albedo_scale(parseFloat(document.getElementById('detail-albedo-scale').value));
+                    if (app.set_detail_albedo_intensity) app.set_detail_albedo_intensity(parseFloat(document.getElementById('detail-albedo-intensity').value));
+                    if (app.set_detail_albedo_blend_mode) app.set_detail_albedo_blend_mode(parseInt(document.getElementById('detail-albedo-blend-mode').value));
                     app.set_aa_mode(parseInt(document.getElementById('aa-mode').value));
                     app.set_fxaa_quality(parseInt(document.getElementById('fxaa-quality').value));
                     app.set_smaa_quality(parseInt(document.getElementById('smaa-quality').value));

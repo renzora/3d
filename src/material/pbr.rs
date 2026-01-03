@@ -39,6 +39,60 @@ pub struct PbrCameraUniform {
     pub light3_color: [f32; 4],
     /// Detail mapping: x=enabled (0/1), y=scale (UV tiling), z=intensity, w=max_distance
     pub detail_settings: [f32; 4],
+    /// Detail albedo: x=enabled (0/1), y=scale, z=intensity, w=blend_mode (0=overlay, 1=multiply, 2=soft_light)
+    pub detail_albedo_settings: [f32; 4],
+    /// Rect light 0: position.xyz + enabled.w
+    pub rectlight0_pos: [f32; 4],
+    /// Rect light 0: direction.xyz + width.w
+    pub rectlight0_dir_width: [f32; 4],
+    /// Rect light 0: tangent.xyz + height.w
+    pub rectlight0_tan_height: [f32; 4],
+    /// Rect light 0: color.rgb + intensity.w
+    pub rectlight0_color: [f32; 4],
+    /// Rect light 1: position.xyz + enabled.w
+    pub rectlight1_pos: [f32; 4],
+    /// Rect light 1: direction.xyz + width.w
+    pub rectlight1_dir_width: [f32; 4],
+    /// Rect light 1: tangent.xyz + height.w
+    pub rectlight1_tan_height: [f32; 4],
+    /// Rect light 1: color.rgb + intensity.w
+    pub rectlight1_color: [f32; 4],
+    /// Capsule light 0: start.xyz + enabled.w
+    pub capsule0_start: [f32; 4],
+    /// Capsule light 0: end.xyz + radius.w
+    pub capsule0_end_radius: [f32; 4],
+    /// Capsule light 0: color.rgb + intensity.w
+    pub capsule0_color: [f32; 4],
+    /// Capsule light 1: start.xyz + enabled.w
+    pub capsule1_start: [f32; 4],
+    /// Capsule light 1: end.xyz + radius.w
+    pub capsule1_end_radius: [f32; 4],
+    /// Capsule light 1: color.rgb + intensity.w
+    pub capsule1_color: [f32; 4],
+    /// Disk light 0: position.xyz + enabled.w
+    pub disk0_pos: [f32; 4],
+    /// Disk light 0: direction.xyz + radius.w
+    pub disk0_dir_radius: [f32; 4],
+    /// Disk light 0: color.rgb + intensity.w
+    pub disk0_color: [f32; 4],
+    /// Disk light 1: position.xyz + enabled.w
+    pub disk1_pos: [f32; 4],
+    /// Disk light 1: direction.xyz + radius.w
+    pub disk1_dir_radius: [f32; 4],
+    /// Disk light 1: color.rgb + intensity.w
+    pub disk1_color: [f32; 4],
+    /// Sphere light 0: position.xyz + enabled.w
+    pub sphere0_pos: [f32; 4],
+    /// Sphere light 0: radius.x + range.y (unused zw)
+    pub sphere0_radius_range: [f32; 4],
+    /// Sphere light 0: color.rgb + intensity.w
+    pub sphere0_color: [f32; 4],
+    /// Sphere light 1: position.xyz + enabled.w
+    pub sphere1_pos: [f32; 4],
+    /// Sphere light 1: radius.x + range.y (unused zw)
+    pub sphere1_radius_range: [f32; 4],
+    /// Sphere light 1: color.rgb + intensity.w
+    pub sphere1_color: [f32; 4],
 }
 
 impl Default for PbrCameraUniform {
@@ -61,6 +115,38 @@ impl Default for PbrCameraUniform {
             light3_color: [0.8, 0.85, 0.9, 1.0],    // Slight blue, enabled
             // Detail mapping: disabled by default, scale=10 (tiles 10x), intensity=0.3, max_distance=5
             detail_settings: [0.0, 10.0, 0.3, 5.0],
+            // Detail albedo: disabled by default, scale=10, intensity=0.3, blend_mode=0 (overlay)
+            detail_albedo_settings: [0.0, 10.0, 0.3, 0.0],
+            // Rect lights: disabled by default
+            rectlight0_pos: [0.0, 0.0, 0.0, 0.0],         // Disabled (w=0)
+            rectlight0_dir_width: [0.0, 0.0, -1.0, 1.0],  // Facing -Z, width=1
+            rectlight0_tan_height: [1.0, 0.0, 0.0, 1.0],  // Tangent along X, height=1
+            rectlight0_color: [1.0, 1.0, 1.0, 10.0],      // White, intensity=10
+            rectlight1_pos: [0.0, 0.0, 0.0, 0.0],         // Disabled (w=0)
+            rectlight1_dir_width: [0.0, 0.0, -1.0, 1.0],
+            rectlight1_tan_height: [1.0, 0.0, 0.0, 1.0],
+            rectlight1_color: [1.0, 1.0, 1.0, 10.0],
+            // Capsule lights: disabled by default
+            capsule0_start: [0.0, 0.0, 0.0, 0.0],         // Disabled (w=0)
+            capsule0_end_radius: [1.0, 0.0, 0.0, 0.05],   // 1 unit long, 5cm radius
+            capsule0_color: [1.0, 1.0, 1.0, 10.0],        // White, intensity=10
+            capsule1_start: [0.0, 0.0, 0.0, 0.0],         // Disabled (w=0)
+            capsule1_end_radius: [1.0, 0.0, 0.0, 0.05],
+            capsule1_color: [1.0, 1.0, 1.0, 10.0],
+            // Disk lights: disabled by default
+            disk0_pos: [0.0, 0.0, 0.0, 0.0],              // Disabled (w=0)
+            disk0_dir_radius: [0.0, -1.0, 0.0, 0.5],      // Facing down, radius=0.5
+            disk0_color: [1.0, 1.0, 1.0, 10.0],           // White, intensity=10
+            disk1_pos: [0.0, 0.0, 0.0, 0.0],              // Disabled (w=0)
+            disk1_dir_radius: [0.0, -1.0, 0.0, 0.5],
+            disk1_color: [1.0, 1.0, 1.0, 10.0],
+            // Sphere lights: disabled by default
+            sphere0_pos: [0.0, 0.0, 0.0, 0.0],            // Disabled (w=0)
+            sphere0_radius_range: [0.1, 20.0, 0.0, 0.0],  // radius=0.1, range=20
+            sphere0_color: [1.0, 1.0, 1.0, 10.0],         // White, intensity=10
+            sphere1_pos: [0.0, 0.0, 0.0, 0.0],            // Disabled (w=0)
+            sphere1_radius_range: [0.1, 20.0, 0.0, 0.0],
+            sphere1_color: [1.0, 1.0, 1.0, 10.0],
         }
     }
 }
@@ -87,7 +173,15 @@ pub struct PbrMaterialUniform {
     pub roughness: f32,
     /// Ambient occlusion.
     pub ao: f32,
-    /// Padding.
+    /// Clear coat intensity (0 = none, 1 = full coverage).
+    pub clear_coat: f32,
+    /// Clear coat roughness (typically much lower than base roughness).
+    pub clear_coat_roughness: f32,
+    /// Sheen/cloth intensity (0 = none, 1 = full cloth).
+    pub sheen: f32,
+    /// Sheen/fuzz color RGB.
+    pub sheen_color: [f32; 3],
+    /// Padding for 16-byte alignment.
     pub _padding: f32,
 }
 
@@ -98,6 +192,10 @@ impl Default for PbrMaterialUniform {
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            sheen: 0.0,
+            sheen_color: [1.0, 1.0, 1.0],
             _padding: 0.0,
         }
     }
@@ -115,6 +213,14 @@ pub struct PbrMaterial {
     pub roughness: f32,
     /// Ambient occlusion.
     pub ao: f32,
+    /// Clear coat intensity (0 = none, 1 = full).
+    pub clear_coat: f32,
+    /// Clear coat roughness (typically very low, e.g., 0.03).
+    pub clear_coat_roughness: f32,
+    /// Sheen/cloth intensity (0 = none, 1 = full cloth).
+    pub sheen: f32,
+    /// Sheen/fuzz color.
+    pub sheen_color: Color,
     /// Render pipeline.
     pipeline: Option<wgpu::RenderPipeline>,
     /// Camera bind group layout.
@@ -145,6 +251,10 @@ impl PbrMaterial {
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            sheen: 0.0,
+            sheen_color: Color::WHITE,
             pipeline: None,
             camera_bind_group_layout: None,
             model_bind_group_layout: None,
@@ -210,6 +320,10 @@ impl PbrMaterial {
             metallic: self.metallic,
             roughness: self.roughness,
             ao: self.ao,
+            clear_coat: self.clear_coat,
+            clear_coat_roughness: self.clear_coat_roughness,
+            sheen: self.sheen,
+            sheen_color: [self.sheen_color.r, self.sheen_color.g, self.sheen_color.b],
             _padding: 0.0,
         }
     }

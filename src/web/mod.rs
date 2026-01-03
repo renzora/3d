@@ -9,12 +9,13 @@ use wgpu::util::DeviceExt;
 use bytemuck;
 
 use crate::core::Clock;
-use crate::math::{Color, Matrix3, Matrix4, Vector3};
+use crate::math::{Color, Euler, EulerOrder, Matrix3, Matrix4, Quaternion, Vector3};
 use crate::material::{TexturedPbrMaterial, TexturedPbrMaterialUniform, LineMaterial, LineModelUniform, PbrCameraUniform, PbrModelUniform};
 use crate::texture::{BrdfLut, Texture2D, Sampler};
 use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
-use crate::helpers::{AxesHelper, GridHelper};
+use crate::helpers::{AxesHelper, GridHelper, GizmoAxis, GizmoDragResult, GizmoMode, TransformGizmo};
+use crate::math::Raycaster;
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
 use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, ProceduralSkyPass, VolumetricFogPass, VolumetricFogQuality, AutoExposurePass, Pass};
 use crate::texture::CubeTexture;
@@ -22,6 +23,8 @@ use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
 use crate::ibl::irradiance::generate_sky_irradiance;
 use crate::illumination::ProbeVolume;
+use crate::nanite::{NaniteRenderer, NaniteConfig, build_clusters};
+use crate::geometry::Vertex;
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
@@ -248,11 +251,18 @@ pub struct RenApp {
     brdf_lut: BrdfLut,
     // Detail normal map for micro-surface detail
     detail_normal_map: crate::texture::DetailNormalMap,
-    // Detail mapping settings: enabled, scale, intensity, max_distance
+    // Detail albedo map for micro-surface color variation
+    detail_albedo_map: crate::texture::DetailAlbedoMap,
+    // Detail normal settings: enabled, scale, intensity, max_distance
     detail_enabled: bool,
     detail_scale: f32,
     detail_intensity: f32,
     detail_max_distance: f32,
+    // Detail albedo settings: enabled, scale, intensity, blend_mode
+    detail_albedo_enabled: bool,
+    detail_albedo_scale: f32,
+    detail_albedo_intensity: f32,
+    detail_albedo_blend_mode: u32,
     // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat
     render_mode: u32,
     // Wireframe rendering
@@ -261,6 +271,15 @@ pub struct RenApp {
     // Particle systems
     particle_systems: Vec<crate::particles::ParticleSystem>,
     particle_sampler: wgpu::Sampler,
+    // Nanite virtualized geometry
+    nanite_renderer: Option<NaniteRenderer>,
+    nanite_enabled: bool,
+    nanite_camera_bind_group: Option<wgpu::BindGroup>,
+    // Transform gizmo
+    gizmo: TransformGizmo,
+    gizmo_line_object: Option<LineObject>,
+    gizmo_enabled: bool,
+    gizmo_target_mesh: Option<usize>,
 }
 
 #[wasm_bindgen]
@@ -313,13 +332,23 @@ impl RenApp {
             wgpu::Features::empty()
         };
 
+        // Get adapter limits and request higher storage buffer size for Nanite
+        let adapter_limits = adapter.limits();
+        let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults()
+            .using_resolution(adapter_limits.clone());
+
+        // Request higher storage buffer limit for Nanite (default is 128MB, need 256MB+)
+        // Use adapter's limit if available, otherwise request 256MB minimum
+        required_limits.max_storage_buffer_binding_size = adapter_limits
+            .max_storage_buffer_binding_size
+            .max(256 * 1024 * 1024);
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Ren Device"),
                     required_features: requested_features,
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
+                    required_limits,
                     memory_hints: Default::default(),
                 },
                 None,
@@ -433,6 +462,37 @@ impl RenApp {
             light3_pos: [-3.0, 1.0, -3.0, 5.0],
             light3_color: [0.8, 0.85, 0.9, 1.0],
             detail_settings: [0.0, 10.0, 0.3, 5.0],  // Disabled by default
+            detail_albedo_settings: [0.0, 10.0, 0.3, 0.0],  // Disabled by default
+            // Rect lights: disabled by default
+            rectlight0_pos: [0.0, 0.0, 0.0, 0.0],
+            rectlight0_dir_width: [0.0, 0.0, -1.0, 1.0],
+            rectlight0_tan_height: [1.0, 0.0, 0.0, 1.0],
+            rectlight0_color: [1.0, 1.0, 1.0, 10.0],
+            rectlight1_pos: [0.0, 0.0, 0.0, 0.0],
+            rectlight1_dir_width: [0.0, 0.0, -1.0, 1.0],
+            rectlight1_tan_height: [1.0, 0.0, 0.0, 1.0],
+            rectlight1_color: [1.0, 1.0, 1.0, 10.0],
+            // Capsule lights: disabled by default
+            capsule0_start: [0.0, 0.0, 0.0, 0.0],
+            capsule0_end_radius: [1.0, 0.0, 0.0, 0.05],
+            capsule0_color: [1.0, 1.0, 1.0, 10.0],
+            capsule1_start: [0.0, 0.0, 0.0, 0.0],
+            capsule1_end_radius: [1.0, 0.0, 0.0, 0.05],
+            capsule1_color: [1.0, 1.0, 1.0, 10.0],
+            // Disk lights: disabled by default
+            disk0_pos: [0.0, 0.0, 0.0, 0.0],
+            disk0_dir_radius: [0.0, -1.0, 0.0, 0.5],
+            disk0_color: [1.0, 1.0, 1.0, 10.0],
+            disk1_pos: [0.0, 0.0, 0.0, 0.0],
+            disk1_dir_radius: [0.0, -1.0, 0.0, 0.5],
+            disk1_color: [1.0, 1.0, 1.0, 10.0],
+            // Sphere lights: disabled by default
+            sphere0_pos: [0.0, 0.0, 0.0, 0.0],
+            sphere0_radius_range: [0.1, 20.0, 0.0, 0.0],
+            sphere0_color: [1.0, 1.0, 1.0, 10.0],
+            sphere1_pos: [0.0, 0.0, 0.0, 0.0],
+            sphere1_radius_range: [0.1, 20.0, 0.0, 0.0],
+            sphere1_color: [1.0, 1.0, 1.0, 10.0],
         };
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -776,6 +836,10 @@ impl RenApp {
         // Generate procedural detail normal map for micro-surface detail
         let detail_normal_map = crate::texture::DetailNormalMap::new(&device, &queue);
 
+        // ========== Detail Albedo Map ==========
+        // Generate procedural detail albedo map for micro-surface color variation
+        let detail_albedo_map = crate::texture::DetailAlbedoMap::new(&device, &queue);
+
         // ========== Particle System Sampler ==========
         let particle_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Particle Sampler"),
@@ -1059,15 +1123,29 @@ impl RenApp {
             irradiance_view,
             brdf_lut,
             detail_normal_map,
+            detail_albedo_map,
             detail_enabled: false,
             detail_scale: 10.0,
             detail_intensity: 0.3,
             detail_max_distance: 5.0,
+            detail_albedo_enabled: false,
+            detail_albedo_scale: 10.0,
+            detail_albedo_intensity: 0.3,
+            detail_albedo_blend_mode: 0, // 0=overlay, 1=multiply, 2=soft_light
             render_mode: 0,
             wireframe_supported,
             wireframe_enabled: false,
             particle_systems: Vec::new(),
             particle_sampler,
+            // Nanite will be lazily initialized when first mesh is added
+            nanite_renderer: None,
+            nanite_enabled: true,
+            nanite_camera_bind_group: None,
+            // Transform gizmo
+            gizmo: TransformGizmo::new(),
+            gizmo_line_object: None,
+            gizmo_enabled: false,
+            gizmo_target_mesh: None,
         })
     }
 
@@ -1186,6 +1264,42 @@ impl RenApp {
                     self.detail_intensity,
                     self.detail_max_distance,
                 ],
+                detail_albedo_settings: [
+                    if self.detail_albedo_enabled { 1.0 } else { 0.0 },
+                    self.detail_albedo_scale,
+                    self.detail_albedo_intensity,
+                    self.detail_albedo_blend_mode as f32,
+                ],
+                // Rect lights: disabled by default (can be enabled via API)
+                rectlight0_pos: [0.0, 0.0, 0.0, 0.0],
+                rectlight0_dir_width: [0.0, 0.0, -1.0, 1.0],
+                rectlight0_tan_height: [1.0, 0.0, 0.0, 1.0],
+                rectlight0_color: [1.0, 1.0, 1.0, 10.0],
+                rectlight1_pos: [0.0, 0.0, 0.0, 0.0],
+                rectlight1_dir_width: [0.0, 0.0, -1.0, 1.0],
+                rectlight1_tan_height: [1.0, 0.0, 0.0, 1.0],
+                rectlight1_color: [1.0, 1.0, 1.0, 10.0],
+                // Capsule lights: disabled by default
+                capsule0_start: [0.0, 0.0, 0.0, 0.0],
+                capsule0_end_radius: [1.0, 0.0, 0.0, 0.05],
+                capsule0_color: [1.0, 1.0, 1.0, 10.0],
+                capsule1_start: [0.0, 0.0, 0.0, 0.0],
+                capsule1_end_radius: [1.0, 0.0, 0.0, 0.05],
+                capsule1_color: [1.0, 1.0, 1.0, 10.0],
+                // Disk lights: disabled by default
+                disk0_pos: [0.0, 0.0, 0.0, 0.0],
+                disk0_dir_radius: [0.0, -1.0, 0.0, 0.5],
+                disk0_color: [1.0, 1.0, 1.0, 10.0],
+                disk1_pos: [0.0, 0.0, 0.0, 0.0],
+                disk1_dir_radius: [0.0, -1.0, 0.0, 0.5],
+                disk1_color: [1.0, 1.0, 1.0, 10.0],
+                // Sphere lights: disabled by default
+                sphere0_pos: [0.0, 0.0, 0.0, 0.0],
+                sphere0_radius_range: [0.1, 20.0, 0.0, 0.0],
+                sphere0_color: [1.0, 1.0, 1.0, 10.0],
+                sphere1_pos: [0.0, 0.0, 0.0, 0.0],
+                sphere1_radius_range: [0.1, 20.0, 0.0, 0.0],
+                sphere1_color: [1.0, 1.0, 1.0, 10.0],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
 
@@ -1556,6 +1670,24 @@ impl RenApp {
                         shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                         shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     }
+
+                    // Render Nanite geometry to shadow map
+                    if self.nanite_enabled {
+                        if let Some(ref nanite) = self.nanite_renderer {
+                            // Create light camera bind group for Nanite shadow pass
+                            let light_matrix_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Nanite Light Matrix Buffer"),
+                                contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            });
+                            let light_camera_bind_group = nanite.create_light_camera_bind_group(
+                                &self.device,
+                                &light_matrix_buffer,
+                            );
+                            // render_shadow sets pipeline and draws
+                            nanite.render_shadow(&mut shadow_pass, &light_camera_bind_group);
+                        }
+                    }
                 }
             }
         } else {
@@ -1565,6 +1697,35 @@ impl RenApp {
                 ..Default::default()
             };
             self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
+        }
+
+        // ========== Nanite GPU Culling (Compute Pass) ==========
+        if self.nanite_enabled {
+            if let Some(ref mut nanite) = self.nanite_renderer {
+                // Reset culling buffers for new frame
+                nanite.begin_frame(&self.queue);
+
+                // Get camera data for culling
+                let mut camera = self.camera.borrow_mut();
+                let fov = camera.fov;
+                let view_proj = camera.view_projection_matrix().clone();
+                let camera_pos = camera.position;
+                drop(camera);
+
+                nanite.update_culling(
+                    &self.queue,
+                    &view_proj,
+                    [camera_pos.x, camera_pos.y, camera_pos.z],
+                    self.height as f32,
+                    fov,
+                );
+
+                // Two-phase culling:
+                // 1. Frustum cull → frustum_clusters_buffer
+                nanite.cull_frustum(&mut encoder);
+                // 2. Occlusion cull (using previous frame's HZB) → visible_clusters_buffer
+                nanite.cull_occlusion(&mut encoder);
+            }
         }
 
         {
@@ -1642,6 +1803,86 @@ impl RenApp {
                         render_pass.set_bind_group(1, &line_obj.model_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, line_obj.vertex_buffer.slice(..));
                         render_pass.draw(0..line_obj.vertex_count, 0..1);
+                    }
+                }
+
+                // Transform gizmo (index stored in gizmo_line_object)
+                if self.gizmo_enabled {
+                    if let Some(ref line_obj) = self.gizmo_line_object {
+                        render_pass.set_bind_group(1, &line_obj.model_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, line_obj.vertex_buffer.slice(..));
+                        render_pass.draw(0..line_obj.vertex_count, 0..1);
+                    }
+                }
+            }
+        }
+
+        // ========== Nanite Visibility Pass ==========
+        // Render cluster/triangle IDs to visibility buffer
+        if self.nanite_enabled {
+            if let Some(ref nanite) = self.nanite_renderer {
+                if nanite.cluster_count() > 0 {
+                    let mut visibility_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Nanite Visibility Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: nanite.visibility_view(),
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load, // Keep existing depth
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    if let Some(ref camera_bg) = self.nanite_camera_bind_group {
+                        nanite.render_visibility(&mut visibility_pass, camera_bg);
+                    }
+                }
+            }
+        }
+
+        // ========== Nanite HZB Build (Compute Pass) ==========
+        // Build hierarchical Z-buffer from depth for next frame's occlusion culling
+        if self.nanite_enabled {
+            if let Some(ref nanite) = self.nanite_renderer {
+                if nanite.cluster_count() > 0 {
+                    nanite.build_hzb(&mut encoder, &self.queue, self.width, self.height);
+                }
+            }
+        }
+
+        // ========== Nanite Material Pass ==========
+        // Shade pixels using visibility buffer data
+        if self.nanite_enabled {
+            if let Some(ref nanite) = self.nanite_renderer {
+                if nanite.cluster_count() > 0 {
+                    let mut material_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Nanite Material Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.scene_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load, // Keep existing scene content
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None, // Reading depth via texture
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    if let Some(ref camera_bg) = self.nanite_camera_bind_group {
+                        nanite.render_material(&mut material_pass, camera_bg);
                     }
                 }
             }
@@ -2100,6 +2341,14 @@ impl RenApp {
             self.outline.resize(width, height);
             self.volumetric_fog.resize(width, height, &self.device);
 
+            // Resize Nanite visibility buffer and HZB
+            if let Some(ref mut nanite) = self.nanite_renderer {
+                nanite.resize(&self.device, width, height);
+                // Recreate bind groups that depend on depth texture
+                nanite.create_material_bind_group(&self.device, &self.depth_view);
+                nanite.create_hzb_build_bind_groups(&self.device, &self.depth_view);
+            }
+
             // Update camera aspect ratio
             let mut camera = self.camera.borrow_mut();
             camera.set_aspect(width as f32 / height as f32);
@@ -2140,6 +2389,42 @@ impl RenApp {
                     self.detail_intensity,
                     self.detail_max_distance,
                 ],
+                detail_albedo_settings: [
+                    if self.detail_albedo_enabled { 1.0 } else { 0.0 },
+                    self.detail_albedo_scale,
+                    self.detail_albedo_intensity,
+                    self.detail_albedo_blend_mode as f32,
+                ],
+                // Rect lights: disabled by default (can be enabled via API)
+                rectlight0_pos: [0.0, 0.0, 0.0, 0.0],
+                rectlight0_dir_width: [0.0, 0.0, -1.0, 1.0],
+                rectlight0_tan_height: [1.0, 0.0, 0.0, 1.0],
+                rectlight0_color: [1.0, 1.0, 1.0, 10.0],
+                rectlight1_pos: [0.0, 0.0, 0.0, 0.0],
+                rectlight1_dir_width: [0.0, 0.0, -1.0, 1.0],
+                rectlight1_tan_height: [1.0, 0.0, 0.0, 1.0],
+                rectlight1_color: [1.0, 1.0, 1.0, 10.0],
+                // Capsule lights: disabled by default
+                capsule0_start: [0.0, 0.0, 0.0, 0.0],
+                capsule0_end_radius: [1.0, 0.0, 0.0, 0.05],
+                capsule0_color: [1.0, 1.0, 1.0, 10.0],
+                capsule1_start: [0.0, 0.0, 0.0, 0.0],
+                capsule1_end_radius: [1.0, 0.0, 0.0, 0.05],
+                capsule1_color: [1.0, 1.0, 1.0, 10.0],
+                // Disk lights: disabled by default
+                disk0_pos: [0.0, 0.0, 0.0, 0.0],
+                disk0_dir_radius: [0.0, -1.0, 0.0, 0.5],
+                disk0_color: [1.0, 1.0, 1.0, 10.0],
+                disk1_pos: [0.0, 0.0, 0.0, 0.0],
+                disk1_dir_radius: [0.0, -1.0, 0.0, 0.5],
+                disk1_color: [1.0, 1.0, 1.0, 10.0],
+                // Sphere lights: disabled by default
+                sphere0_pos: [0.0, 0.0, 0.0, 0.0],
+                sphere0_radius_range: [0.1, 20.0, 0.0, 0.0],
+                sphere0_color: [1.0, 1.0, 1.0, 10.0],
+                sphere1_pos: [0.0, 0.0, 0.0, 0.0],
+                sphere1_radius_range: [0.1, 20.0, 0.0, 0.0],
+                sphere1_color: [1.0, 1.0, 1.0, 10.0],
             };
             self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniform]));
         }
@@ -2167,19 +2452,100 @@ impl RenApp {
         }
     }
 
-    /// Handle mouse drag for rotation (left button).
+    /// Handle mouse drag for orbit rotation (Alt + left button).
     #[wasm_bindgen]
-    pub fn on_mouse_drag(&self, delta_x: f32, delta_y: f32) {
+    pub fn on_mouse_orbit(&self, delta_x: f32, delta_y: f32) {
         let mut controls = self.controls.borrow_mut();
         controls.rotate_by_pixels(delta_x, delta_y, self.height as f32);
     }
 
-    /// Handle mouse drag for panning (right button or shift+left).
+    /// Handle mouse drag for freelook (right button).
+    /// Rotates the camera view direction without moving position.
+    #[wasm_bindgen]
+    pub fn on_mouse_freelook(&self, delta_x: f32, delta_y: f32) {
+        let mut controls = self.controls.borrow_mut();
+        let mut camera = self.camera.borrow_mut();
+
+        // Sensitivity for freelook
+        let sensitivity = 0.003;
+
+        // Get current forward direction
+        let diff = controls.target - camera.position;
+        let forward = diff.normalized();
+
+        // Calculate current yaw and pitch
+        let mut yaw = forward.z.atan2(forward.x);
+        let mut pitch = forward.y.asin();
+
+        // Apply deltas
+        yaw += delta_x * sensitivity;
+        pitch -= delta_y * sensitivity;
+
+        // Clamp pitch to prevent flipping
+        let max_pitch = std::f32::consts::FRAC_PI_2 - 0.01;
+        pitch = pitch.clamp(-max_pitch, max_pitch);
+
+        // Calculate new forward direction
+        let new_forward = Vector3::new(
+            pitch.cos() * yaw.cos(),
+            pitch.sin(),
+            pitch.cos() * yaw.sin(),
+        );
+
+        // Update target to be in front of camera
+        let distance = diff.length();
+        controls.target = camera.position + new_forward * distance;
+
+        // Update camera to look at new target
+        camera.set_target(controls.target);
+    }
+
+    /// Handle mouse drag for panning (middle button).
     #[wasm_bindgen]
     pub fn on_mouse_pan(&self, delta_x: f32, delta_y: f32) {
         let mut controls = self.controls.borrow_mut();
         let camera = self.camera.borrow();
         controls.pan(delta_x, delta_y, &camera);
+    }
+
+    /// Handle mouse drag for horizontal glide (left button).
+    /// LMB drag = forward/back movement + yaw turning.
+    #[wasm_bindgen]
+    pub fn on_mouse_glide(&self, delta_x: f32, delta_y: f32) {
+        let mut controls = self.controls.borrow_mut();
+        let mut camera = self.camera.borrow_mut();
+
+        // Get current camera yaw from forward direction
+        let forward_3d = controls.target - camera.position;
+        let distance = forward_3d.length();
+        let yaw = forward_3d.z.atan2(forward_3d.x);
+
+        // Yaw turning from horizontal mouse movement
+        let mouse_sensitivity = 0.005;
+        let yaw_delta = delta_x * mouse_sensitivity;
+        let new_yaw = yaw + yaw_delta;
+
+        // Forward movement from vertical mouse movement, rotated by current yaw
+        let move_speed = distance * 0.001;
+        let forward_amount = -delta_y * move_speed;
+        let movement = Vector3::new(
+            forward_amount * new_yaw.cos(),
+            0.0,
+            forward_amount * new_yaw.sin(),
+        );
+
+        // Move camera position
+        let new_pos = camera.position + movement;
+        camera.set_position(new_pos);
+
+        // Update target: maintain distance, apply new yaw
+        let new_forward = Vector3::new(
+            distance * new_yaw.cos(),
+            forward_3d.y, // Keep same pitch
+            distance * new_yaw.sin(),
+        );
+        controls.target = new_pos + new_forward;
+        camera.set_target(controls.target);
     }
 
     /// Handle mouse wheel for zoom.
@@ -2196,6 +2562,24 @@ impl RenApp {
         let mut controls = self.controls.borrow_mut();
         let camera = self.camera.borrow();
         controls.translate(forward, right, up, &camera);
+    }
+
+    /// Focus camera on origin (F key).
+    #[wasm_bindgen]
+    pub fn focus_on_origin(&self) {
+        let mut controls = self.controls.borrow_mut();
+        let mut camera = self.camera.borrow_mut();
+
+        // Reset target to origin
+        controls.target = Vector3::ZERO;
+
+        // Position camera at a good viewing distance
+        let distance = 5.0;
+        camera.set_position(Vector3::new(distance, distance * 0.7, distance));
+        camera.set_target(Vector3::ZERO);
+
+        // Reset controls to match camera
+        controls.reset_to_camera(&camera);
     }
 
     /// Load a GLTF/GLB model from bytes.
@@ -2364,10 +2748,15 @@ impl RenApp {
                 metallic,
                 roughness,
                 ao: 1.0,
+                clear_coat: 0.0,
+                clear_coat_roughness: 0.03,
+                sheen: 0.0,
                 use_albedo_map: if has_albedo { 1.0 } else { 0.0 },
                 use_normal_map: if has_normal { 1.0 } else { 0.0 },
                 use_metallic_roughness_map: if has_mr { 1.0 } else { 0.0 },
-                _padding: [0.0; 2],
+                _padding1: [0.0; 3],
+                sheen_color: [1.0, 1.0, 1.0],
+                _padding2: 0.0,
             };
 
             // Get textures or use defaults
@@ -2404,6 +2793,8 @@ impl RenApp {
                     &self.skybox_sampler,
                     self.detail_normal_map.view(),
                     self.detail_normal_map.sampler(),
+                    self.detail_albedo_map.view(),
+                    self.detail_albedo_map.sampler(),
                 )
                 .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -2928,6 +3319,32 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_detail_max_distance(&mut self, distance: f32) {
         self.detail_max_distance = distance.clamp(1.0, 50.0);
+    }
+
+    /// Enable or disable detail albedo for micro-surface color variation.
+    #[wasm_bindgen]
+    pub fn set_detail_albedo_enabled(&mut self, enabled: bool) {
+        self.detail_albedo_enabled = enabled;
+    }
+
+    /// Set detail albedo UV scale (tiling frequency).
+    /// Higher values = more tiling = finer color variation.
+    #[wasm_bindgen]
+    pub fn set_detail_albedo_scale(&mut self, scale: f32) {
+        self.detail_albedo_scale = scale.clamp(1.0, 50.0);
+    }
+
+    /// Set detail albedo intensity (blend strength).
+    #[wasm_bindgen]
+    pub fn set_detail_albedo_intensity(&mut self, intensity: f32) {
+        self.detail_albedo_intensity = intensity.clamp(0.0, 1.0);
+    }
+
+    /// Set detail albedo blend mode.
+    /// 0 = Overlay (default), 1 = Multiply, 2 = Soft Light
+    #[wasm_bindgen]
+    pub fn set_detail_albedo_blend_mode(&mut self, mode: u32) {
+        self.detail_albedo_blend_mode = mode.min(2);
     }
 
     /// Set light position (index 0-3).
@@ -4179,10 +4596,15 @@ impl RenApp {
             metallic,
             roughness,
             ao: 1.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            sheen: 0.0,
             use_albedo_map: 0.0,
             use_normal_map: 0.0,
             use_metallic_roughness_map: 0.0,
-            _padding: [0.0; 2],
+            _padding1: [0.0; 3],
+            sheen_color: [1.0, 1.0, 1.0],
+            _padding2: 0.0,
         };
 
         // Create combined texture + shadow + env + BRDF + irradiance + detail bind group with default textures
@@ -4208,6 +4630,8 @@ impl RenApp {
                 &self.skybox_sampler,
                 self.detail_normal_map.view(),
                 self.detail_normal_map.sampler(),
+                self.detail_albedo_map.view(),
+                self.detail_albedo_map.sampler(),
             )
             .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
 
@@ -4433,6 +4857,863 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn clear_particle_systems(&mut self) {
         self.particle_systems.clear();
+    }
+
+    // ========== Nanite Virtualized Geometry ==========
+
+    /// Initialize the Nanite renderer if not already initialized.
+    fn ensure_nanite_initialized(&mut self) {
+        if self.nanite_renderer.is_none() {
+            let config = NaniteConfig::default();
+            let depth_format = wgpu::TextureFormat::Depth32Float;
+
+            let mut nanite = NaniteRenderer::new(
+                &self.device,
+                config,
+                self.hdr_format,
+                depth_format,
+                self.width,
+                self.height,
+            );
+
+            // Create material bind group with depth texture
+            nanite.create_material_bind_group(&self.device, &self.depth_view);
+
+            // Create HZB build bind groups for occlusion culling
+            nanite.create_hzb_build_bind_groups(&self.device, &self.depth_view);
+
+            // Create camera bind group for Nanite (compatible layout)
+            let camera_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Nanite Camera Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+            self.nanite_camera_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Nanite Camera Bind Group"),
+                layout: &camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buffer.as_entire_binding(),
+                }],
+            }));
+
+            // Create combined texture+shadow bind group for Nanite material pass
+            // Group 3 bindings: 0=materials, 1=texture_array, 2=texture_sampler, 3=shadow_data, 4=shadow_map, 5=shadow_sampler, 6=shadow_cube, 7=shadow_cube_sampler
+            if let Some(texture_view) = nanite.texture_array_view() {
+                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Nanite Textures+Shadows Bind Group"),
+                    layout: nanite.textures_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: nanite.material_buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(nanite.texture_sampler()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.shadow_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_cube_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_cube_sampler),
+                        },
+                    ],
+                });
+                nanite.set_texture_bind_group(texture_bind_group);
+            }
+
+            self.nanite_renderer = Some(nanite);
+        }
+    }
+
+    /// Enable or disable Nanite rendering.
+    #[wasm_bindgen]
+    pub fn set_nanite_enabled(&mut self, enabled: bool) {
+        self.nanite_enabled = enabled;
+    }
+
+    /// Check if Nanite is enabled.
+    #[wasm_bindgen]
+    pub fn nanite_enabled(&self) -> bool {
+        self.nanite_enabled
+    }
+
+    /// Load a mesh as Nanite geometry from vertex/index arrays.
+    /// Returns the Nanite mesh ID for use with instance transforms.
+    #[wasm_bindgen]
+    pub fn load_nanite_mesh(&mut self, positions: &[f32], normals: &[f32], uvs: &[f32], indices: &[u32]) -> u32 {
+        self.ensure_nanite_initialized();
+
+        // Convert flat arrays to vertices
+        let vertex_count = positions.len() / 3;
+        let has_normals = normals.len() == vertex_count * 3;
+        let has_uvs = uvs.len() == vertex_count * 2;
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(vertex_count);
+        for i in 0..vertex_count {
+            let position = [
+                positions[i * 3],
+                positions[i * 3 + 1],
+                positions[i * 3 + 2],
+            ];
+            let normal = if has_normals {
+                [normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let uv = if has_uvs {
+                [uvs[i * 2], uvs[i * 2 + 1]]
+            } else {
+                [0.0, 0.0]
+            };
+            vertices.push(Vertex {
+                position,
+                normal,
+                uv,
+                barycentric: [0.0, 0.0, 0.0], // Not used for Nanite
+            });
+        }
+
+        // Build clusters
+        let config = NaniteConfig::default();
+        let result = build_clusters(&vertices, indices, config.triangles_per_cluster, 0);
+
+        // Register with renderer
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
+            return mesh_id as u32;
+        }
+
+        0
+    }
+
+    /// Set Nanite instance transform.
+    #[wasm_bindgen]
+    pub fn set_nanite_instance(&mut self, mesh_id: u32, m00: f32, m01: f32, m02: f32, m03: f32,
+                               m10: f32, m11: f32, m12: f32, m13: f32,
+                               m20: f32, m21: f32, m22: f32, m23: f32,
+                               m30: f32, m31: f32, m32: f32, m33: f32) {
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let transform = Matrix4::new(
+                m00, m01, m02, m03,
+                m10, m11, m12, m13,
+                m20, m21, m22, m23,
+                m30, m31, m32, m33,
+            );
+            nanite.update_instances(&self.queue, &[(mesh_id as usize, transform)]);
+        }
+    }
+
+    /// Get Nanite cluster count (for debugging).
+    #[wasm_bindgen]
+    pub fn nanite_cluster_count(&self) -> u32 {
+        if let Some(ref nanite) = self.nanite_renderer {
+            nanite.cluster_count()
+        } else {
+            0
+        }
+    }
+
+    /// Add a demo cube rendered via Nanite.
+    #[wasm_bindgen]
+    pub fn add_nanite_demo_cube(&mut self) {
+        self.ensure_nanite_initialized();
+
+        // Simple cube with 8 vertices and 12 triangles (2 per face)
+        let s = 0.5f32; // half-size
+
+        // 8 corner vertices
+        let positions: Vec<[f32; 3]> = vec![
+            [-s, -s, -s], // 0: left-bottom-back
+            [ s, -s, -s], // 1: right-bottom-back
+            [ s,  s, -s], // 2: right-top-back
+            [-s,  s, -s], // 3: left-top-back
+            [-s, -s,  s], // 4: left-bottom-front
+            [ s, -s,  s], // 5: right-bottom-front
+            [ s,  s,  s], // 6: right-top-front
+            [-s,  s,  s], // 7: left-top-front
+        ];
+
+        // Face normals for each vertex (approximation - use face normal)
+        let normals: Vec<[f32; 3]> = vec![
+            [-0.577, -0.577, -0.577],
+            [ 0.577, -0.577, -0.577],
+            [ 0.577,  0.577, -0.577],
+            [-0.577,  0.577, -0.577],
+            [-0.577, -0.577,  0.577],
+            [ 0.577, -0.577,  0.577],
+            [ 0.577,  0.577,  0.577],
+            [-0.577,  0.577,  0.577],
+        ];
+
+        let uvs: Vec<[f32; 2]> = vec![
+            [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+            [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],
+        ];
+
+        // 12 triangles (2 per face), counter-clockwise winding when viewed from outside
+        let indices: Vec<u32> = vec![
+            // Front face (+Z)
+            4, 5, 6,  4, 6, 7,
+            // Back face (-Z)
+            1, 0, 3,  1, 3, 2,
+            // Right face (+X)
+            5, 1, 2,  5, 2, 6,
+            // Left face (-X)
+            0, 4, 7,  0, 7, 3,
+            // Top face (+Y)
+            7, 6, 2,  7, 2, 3,
+            // Bottom face (-Y)
+            0, 1, 5,  0, 5, 4,
+        ];
+
+        // Convert to Vertex format
+        let vertices: Vec<Vertex> = positions.iter().enumerate().map(|(i, &pos)| {
+            Vertex {
+                position: pos,
+                normal: normals[i],
+                uv: uvs[i % uvs.len()],
+                barycentric: [0.0, 0.0, 0.0],
+            }
+        }).collect();
+
+        // Build clusters (12 triangles = 1 cluster)
+        let config = NaniteConfig::default();
+        let result = build_clusters(&vertices, &indices, config.triangles_per_cluster, 0);
+
+        // Register with Nanite renderer
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
+            // Set identity transform (centered at origin)
+            nanite.update_instances(&self.queue, &[(mesh_id, Matrix4::identity())]);
+        }
+    }
+
+    /// Load a GLTF/GLB file as Nanite geometry.
+    /// Returns the number of meshes loaded.
+    #[wasm_bindgen]
+    pub fn load_gltf_nanite(&mut self, data: &[u8]) -> Result<u32, JsValue> {
+        self.ensure_nanite_initialized();
+
+        // Parse GLTF
+        let loader = GltfLoader::new();
+        let scene = loader.load_from_bytes(data)
+            .map_err(|e| JsValue::from_str(&format!("Failed to load GLTF: {}", e)))?;
+
+        // Helper to compute transform matrix from TRS using Matrix4::compose
+        fn compute_node_transform(node: &crate::loaders::LoadedNode) -> Matrix4 {
+            let t = node.translation;
+            let r = node.rotation; // quaternion xyzw
+            let s = node.scale;
+
+            let position = Vector3::new(t[0], t[1], t[2]);
+            let quaternion = Quaternion::new(r[0], r[1], r[2], r[3]);
+            let scale = Vector3::new(s[0], s[1], s[2]);
+
+            Matrix4::compose(&position, &quaternion, &scale)
+        }
+
+        // Compute world transforms for each mesh
+        let mut mesh_transforms: Vec<(usize, Matrix4)> = Vec::new();
+
+        fn process_node(
+            node_idx: usize,
+            parent_transform: &Matrix4,
+            scene: &LoadedScene,
+            mesh_transforms: &mut Vec<(usize, Matrix4)>,
+            compute_transform: fn(&crate::loaders::LoadedNode) -> Matrix4,
+        ) {
+            if let Some(node) = scene.nodes.get(node_idx) {
+                let local_transform = compute_transform(node);
+                let world_transform = parent_transform.multiply(&local_transform);
+
+                for &mesh_idx in &node.mesh_indices {
+                    mesh_transforms.push((mesh_idx, world_transform.clone()));
+                }
+
+                for &child_idx in &node.children {
+                    process_node(child_idx, &world_transform, scene, mesh_transforms, compute_transform);
+                }
+            }
+        }
+
+        let identity = Matrix4::identity();
+        for &root_idx in &scene.root_nodes {
+            process_node(root_idx, &identity, &scene, &mut mesh_transforms, compute_node_transform);
+        }
+
+        let config = NaniteConfig::default();
+        let mut loaded_count = 0u32;
+        let mut all_mesh_ids: Vec<usize> = Vec::new();
+
+        for (mesh_idx, world_transform) in mesh_transforms {
+            if let Some(loaded_mesh) = scene.meshes.get(mesh_idx) {
+                let geometry = &loaded_mesh.geometry;
+
+                // Convert to Vertex format and bake world transform into positions
+                // This is needed because the frustum cull shader currently only supports
+                // a single instance transform for all clusters
+                let mut vertices: Vec<Vertex> = Vec::with_capacity(geometry.positions.len());
+                for i in 0..geometry.positions.len() {
+                    let pos = geometry.positions[i];
+                    let normal = geometry.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
+
+                    // Transform position by world matrix
+                    let pos_vec = Vector3::new(pos[0], pos[1], pos[2]);
+                    let transformed_pos = world_transform.transform_point(&pos_vec);
+
+                    // Transform normal by world matrix (ignoring translation)
+                    let normal_vec = Vector3::new(normal[0], normal[1], normal[2]);
+                    let transformed_normal = world_transform.transform_direction(&normal_vec);
+
+                    vertices.push(Vertex {
+                        position: [transformed_pos.x, transformed_pos.y, transformed_pos.z],
+                        normal: [transformed_normal.x, transformed_normal.y, transformed_normal.z],
+                        uv: geometry.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                        barycentric: [0.0, 0.0, 0.0],
+                    });
+                }
+
+                // Build clusters
+                let result = build_clusters(
+                    &vertices,
+                    &geometry.indices,
+                    config.triangles_per_cluster,
+                    loaded_mesh.material_index.unwrap_or(0) as u32,
+                );
+
+                // Register with Nanite renderer
+                if let Some(ref mut nanite) = self.nanite_renderer {
+                    let nanite_mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
+                    all_mesh_ids.push(nanite_mesh_id);
+                    loaded_count += 1;
+                }
+            }
+        }
+
+        // Set identity transform for all instances (transforms already baked into vertices)
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let instances: Vec<(usize, Matrix4)> = all_mesh_ids
+                .iter()
+                .map(|&id| (id, Matrix4::identity()))
+                .collect();
+            nanite.update_instances(&self.queue, &instances);
+        }
+
+        // Extract materials and textures
+        use crate::nanite::NaniteMaterialGpu;
+
+        // Build texture name -> index map
+        let mut texture_name_to_index: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let mut texture_data: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+
+        for (name, tex) in &scene.textures {
+            let idx = texture_data.len() as i32;
+            texture_name_to_index.insert(name.clone(), idx);
+            web_sys::console::log_1(&format!(
+                "  Texture {}: {} = {}x{} ({} bytes)",
+                idx, name, tex.width, tex.height, tex.data.len()
+            ).into());
+            texture_data.push((tex.width, tex.height, tex.data.clone()));
+        }
+
+        web_sys::console::log_1(&format!(
+            "Nanite: Found {} textures, {} materials",
+            texture_data.len(),
+            scene.materials.len()
+        ).into());
+
+        // Build materials array
+        let mut gpu_materials: Vec<NaniteMaterialGpu> = Vec::new();
+        for (i, mat) in scene.materials.iter().enumerate() {
+            let texture_index = mat.base_color_texture
+                .as_ref()
+                .and_then(|name| texture_name_to_index.get(name).copied())
+                .unwrap_or(-1);
+
+            web_sys::console::log_1(&format!(
+                "  Material {}: base_color={:?}, tex_ref={:?}, tex_idx={}",
+                i, mat.base_color, mat.base_color_texture, texture_index
+            ).into());
+
+            gpu_materials.push(NaniteMaterialGpu {
+                base_color: [
+                    mat.base_color[0],
+                    mat.base_color[1],
+                    mat.base_color[2],
+                    mat.base_color[3],
+                ],
+                texture_index,
+                metallic: mat.metallic,
+                roughness: mat.roughness,
+                _pad: 0.0,
+            });
+        }
+
+        // Add default material if none
+        if gpu_materials.is_empty() {
+            gpu_materials.push(NaniteMaterialGpu::default());
+        }
+
+        // Upload materials and textures
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let texture_refs: Vec<(u32, u32, &[u8])> = texture_data
+                .iter()
+                .map(|(w, h, d)| (*w, *h, d.as_slice()))
+                .collect();
+
+            nanite.upload_materials_and_textures(
+                &self.device,
+                &self.queue,
+                &gpu_materials,
+                &texture_refs,
+            );
+
+            // Create combined texture+shadow bind group
+            if let Some(texture_view) = nanite.texture_array_view() {
+                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Nanite Textures+Shadows Bind Group"),
+                    layout: nanite.textures_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: nanite.material_buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(nanite.texture_sampler()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.shadow_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_cube_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_cube_sampler),
+                        },
+                    ],
+                });
+                nanite.set_texture_bind_group(texture_bind_group);
+            }
+        }
+
+        Ok(loaded_count)
+    }
+
+    // ========== Material Properties ==========
+
+    /// Set clear coat intensity for all meshes (0.0 = none, 1.0 = full glossy coat).
+    #[wasm_bindgen]
+    pub fn set_clear_coat(&mut self, value: f32) {
+        for mesh in &self.meshes {
+            // clear_coat is at byte offset 28 (after base_color[16] + metallic[4] + roughness[4] + ao[4])
+            self.queue.write_buffer(&mesh.material_buffer, 28, bytemuck::cast_slice(&[value]));
+        }
+    }
+
+    /// Set clear coat roughness for all meshes (typically very low, e.g., 0.03).
+    #[wasm_bindgen]
+    pub fn set_clear_coat_roughness(&mut self, value: f32) {
+        for mesh in &self.meshes {
+            // clear_coat_roughness is at byte offset 32
+            self.queue.write_buffer(&mesh.material_buffer, 32, bytemuck::cast_slice(&[value]));
+        }
+    }
+
+    /// Set sheen/cloth intensity for all meshes (0.0 = none, 1.0 = full cloth BRDF).
+    #[wasm_bindgen]
+    pub fn set_sheen(&mut self, value: f32) {
+        for mesh in &self.meshes {
+            // sheen is at byte offset 36
+            self.queue.write_buffer(&mesh.material_buffer, 36, bytemuck::cast_slice(&[value]));
+        }
+    }
+
+    /// Set sheen color for all meshes.
+    #[wasm_bindgen]
+    pub fn set_sheen_color(&mut self, r: f32, g: f32, b: f32) {
+        for mesh in &self.meshes {
+            // sheen_color is at byte offset 64 (after padding at 52-63)
+            self.queue.write_buffer(&mesh.material_buffer, 64, bytemuck::cast_slice(&[r, g, b]));
+        }
+    }
+
+    /// Set metallic factor for all meshes (0.0 = dielectric, 1.0 = metal).
+    #[wasm_bindgen]
+    pub fn set_material_metallic(&mut self, value: f32) {
+        for mesh in &self.meshes {
+            // metallic is at byte offset 16 (after base_color[16])
+            self.queue.write_buffer(&mesh.material_buffer, 16, bytemuck::cast_slice(&[value]));
+        }
+    }
+
+    /// Set roughness factor for all meshes (0.04 = mirror-like, 1.0 = completely rough).
+    #[wasm_bindgen]
+    pub fn set_material_roughness(&mut self, value: f32) {
+        for mesh in &self.meshes {
+            // roughness is at byte offset 20
+            self.queue.write_buffer(&mesh.material_buffer, 20, bytemuck::cast_slice(&[value]));
+        }
+    }
+
+    // ========== Transform Gizmo ==========
+
+    /// Enable or disable the transform gizmo.
+    #[wasm_bindgen]
+    pub fn set_gizmo_enabled(&mut self, enabled: bool) {
+        self.gizmo_enabled = enabled;
+        if enabled {
+            self.update_gizmo_buffers();
+        }
+    }
+
+    /// Check if gizmo is enabled.
+    #[wasm_bindgen]
+    pub fn is_gizmo_enabled(&self) -> bool {
+        self.gizmo_enabled
+    }
+
+    /// Set the gizmo mode (0 = Translate, 1 = Rotate, 2 = Scale).
+    #[wasm_bindgen]
+    pub fn set_gizmo_mode(&mut self, mode: u32) {
+        let gizmo_mode = match mode {
+            0 => GizmoMode::Translate,
+            1 => GizmoMode::Rotate,
+            2 => GizmoMode::Scale,
+            _ => GizmoMode::Translate,
+        };
+        self.gizmo.set_mode(gizmo_mode);
+        if self.gizmo_enabled {
+            self.update_gizmo_buffers();
+        }
+    }
+
+    /// Get current gizmo mode (0 = Translate, 1 = Rotate, 2 = Scale).
+    #[wasm_bindgen]
+    pub fn get_gizmo_mode(&self) -> u32 {
+        match self.gizmo.mode() {
+            GizmoMode::Translate => 0,
+            GizmoMode::Rotate => 1,
+            GizmoMode::Scale => 2,
+        }
+    }
+
+    /// Attach gizmo to a mesh by index.
+    #[wasm_bindgen]
+    pub fn attach_gizmo_to_mesh(&mut self, mesh_index: usize) {
+        if mesh_index < self.meshes.len() {
+            self.gizmo_target_mesh = Some(mesh_index);
+            let pos = self.meshes[mesh_index].position;
+            self.gizmo.set_position(pos);
+            if self.gizmo_enabled {
+                self.update_gizmo_buffers();
+            }
+        }
+    }
+
+    /// Detach gizmo from any mesh.
+    #[wasm_bindgen]
+    pub fn detach_gizmo(&mut self) {
+        self.gizmo_target_mesh = None;
+    }
+
+    /// Get the index of the mesh the gizmo is attached to, or -1 if none.
+    #[wasm_bindgen]
+    pub fn get_gizmo_target_mesh(&self) -> i32 {
+        self.gizmo_target_mesh.map(|i| i as i32).unwrap_or(-1)
+    }
+
+    /// Check if gizmo is currently being dragged.
+    #[wasm_bindgen]
+    pub fn is_gizmo_dragging(&self) -> bool {
+        self.gizmo.is_dragging()
+    }
+
+    /// Handle gizmo hover - returns the hovered axis (0=None, 1=X, 2=Y, 3=Z, 4=XY, 5=XZ, 6=YZ, 7=Center).
+    #[wasm_bindgen]
+    pub fn on_gizmo_hover(&mut self, screen_x: f32, screen_y: f32) -> u32 {
+        if !self.gizmo_enabled || self.gizmo_target_mesh.is_none() {
+            return 0;
+        }
+
+        let ray = self.screen_to_ray(screen_x, screen_y);
+        let camera = self.camera.borrow();
+        self.gizmo.update_screen_scale(camera.position);
+        drop(camera);
+
+        let axis = self.gizmo.hit_test(&ray);
+        if axis.is_some() {
+            self.update_gizmo_buffers();
+        }
+
+        match axis {
+            Some(GizmoAxis::X) => 1,
+            Some(GizmoAxis::Y) => 2,
+            Some(GizmoAxis::Z) => 3,
+            Some(GizmoAxis::XY) => 4,
+            Some(GizmoAxis::XZ) => 5,
+            Some(GizmoAxis::YZ) => 6,
+            Some(GizmoAxis::Center) => 7,
+            _ => 0,
+        }
+    }
+
+    /// Start a gizmo drag operation. Returns true if drag started successfully.
+    #[wasm_bindgen]
+    pub fn on_gizmo_drag_start(&mut self, screen_x: f32, screen_y: f32) -> bool {
+        if !self.gizmo_enabled {
+            return false;
+        }
+
+        let mesh_index = match self.gizmo_target_mesh {
+            Some(i) => i,
+            None => return false,
+        };
+
+        let ray = self.screen_to_ray(screen_x, screen_y);
+        let camera = self.camera.borrow();
+        self.gizmo.update_screen_scale(camera.position);
+        drop(camera);
+
+        let axis = match self.gizmo.hit_test(&ray) {
+            Some(a) => a,
+            None => return false,
+        };
+
+        if axis == GizmoAxis::None {
+            return false;
+        }
+
+        let mesh = &self.meshes[mesh_index];
+        let position = mesh.position;
+        let rotation = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
+        let scale = mesh.scale;
+
+        let started = self.gizmo.begin_drag(axis, &ray, position, rotation, scale);
+        if started {
+            self.update_gizmo_buffers();
+        }
+        started
+    }
+
+    /// Update a gizmo drag operation and apply transform to target mesh.
+    #[wasm_bindgen]
+    pub fn on_gizmo_drag(&mut self, screen_x: f32, screen_y: f32) {
+        if !self.gizmo.is_dragging() {
+            return;
+        }
+
+        let mesh_index = match self.gizmo_target_mesh {
+            Some(i) => i,
+            None => return,
+        };
+
+        let ray = self.screen_to_ray(screen_x, screen_y);
+        let result = self.gizmo.update_drag(&ray);
+
+        // Apply the transform result to the mesh
+        match result {
+            GizmoDragResult::Translate(delta) => {
+                let mesh = &mut self.meshes[mesh_index];
+                mesh.position = mesh.position + delta;
+                self.gizmo.set_position(mesh.position);
+                self.update_mesh_transform(mesh_index);
+            }
+            GizmoDragResult::Rotate(delta_quat) => {
+                let mesh = &mut self.meshes[mesh_index];
+                let current_quat = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
+                let new_quat = delta_quat.multiply(&current_quat);
+                let euler = Euler::from_quaternion(&new_quat, EulerOrder::XYZ);
+                mesh.rotation = Vector3::new(euler.x, euler.y, euler.z);
+                self.update_mesh_transform(mesh_index);
+            }
+            GizmoDragResult::Scale(delta_scale) => {
+                let mesh = &mut self.meshes[mesh_index];
+                mesh.scale = Vector3::new(
+                    mesh.scale.x * delta_scale.x,
+                    mesh.scale.y * delta_scale.y,
+                    mesh.scale.z * delta_scale.z,
+                );
+                self.update_mesh_transform(mesh_index);
+            }
+            GizmoDragResult::None => {}
+        }
+
+        self.update_gizmo_buffers();
+    }
+
+    /// End a gizmo drag operation.
+    #[wasm_bindgen]
+    pub fn on_gizmo_drag_end(&mut self) {
+        self.gizmo.end_drag();
+        self.update_gizmo_buffers();
+    }
+
+    /// Get number of meshes (for UI to show mesh selector).
+    #[wasm_bindgen]
+    pub fn get_mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
+    /// Convert screen coordinates to a world-space ray.
+    fn screen_to_ray(&self, screen_x: f32, screen_y: f32) -> crate::math::Ray {
+        let mut camera = self.camera.borrow_mut();
+        let view = camera.view_matrix().clone();
+        let proj = camera.projection_matrix().clone();
+        let view_proj = proj.multiply(&view);
+        let view_proj_inverse = view_proj.inverse();
+
+        Raycaster::ray_from_screen(
+            screen_x,
+            screen_y,
+            self.width as f32,
+            self.height as f32,
+            &view_proj_inverse,
+        )
+    }
+
+    /// Update mesh transform buffer after gizmo manipulation.
+    fn update_mesh_transform(&mut self, mesh_index: usize) {
+        if mesh_index >= self.meshes.len() {
+            return;
+        }
+
+        let mesh = &self.meshes[mesh_index];
+        let rotation_quat = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
+        let world_transform = Matrix4::compose(&mesh.position, &rotation_quat, &mesh.scale);
+        let normal_matrix = Matrix3::from_matrix4_normal(&world_transform);
+
+        let model_uniform = PbrModelUniform {
+            model: matrix4_to_array(&world_transform),
+            normal: matrix3_to_padded_array(&normal_matrix),
+        };
+
+        self.queue.write_buffer(
+            &mesh.model_buffer,
+            0,
+            bytemuck::cast_slice(&[model_uniform]),
+        );
+    }
+
+    /// Update gizmo line object buffers.
+    fn update_gizmo_buffers(&mut self) {
+        // Update gizmo scale and rebuild geometry
+        let camera = self.camera.borrow();
+        self.gizmo.update_screen_scale(camera.position);
+        drop(camera);
+
+        self.gizmo.update(&self.device, &self.queue);
+
+        let vertices = self.gizmo.line().vertices();
+        if vertices.is_empty() {
+            return;
+        }
+
+        let vertex_data: Vec<f32> = vertices
+            .iter()
+            .flat_map(|v| [v.position[0], v.position[1], v.position[2], v.color[0], v.color[1], v.color[2], v.color[3]])
+            .collect();
+
+        // Compute model uniform with gizmo position
+        let position = self.gizmo.position();
+        let model_matrix = Matrix4::from_translation(&position);
+        let model_uniform = LineModelUniform {
+            model: matrix4_to_array(&model_matrix),
+        };
+
+        if let Some(ref mut line_obj) = self.gizmo_line_object {
+            // Update existing buffers if size is the same
+            if line_obj.vertex_count == vertices.len() as u32 {
+                self.queue.write_buffer(&line_obj.vertex_buffer, 0, bytemuck::cast_slice(&vertex_data));
+                self.queue.write_buffer(&line_obj.model_buffer, 0, bytemuck::cast_slice(&[model_uniform]));
+            } else {
+                // Recreate buffers
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Gizmo Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&vertex_data),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+
+                let model_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Gizmo Model Buffer"),
+                    contents: bytemuck::cast_slice(&[model_uniform]),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+
+                if let Some(model_bind_group) = self.line_material.create_model_bind_group(&self.device, &model_buffer) {
+                    line_obj.vertex_buffer = vertex_buffer;
+                    line_obj.vertex_count = vertices.len() as u32;
+                    line_obj.model_buffer = model_buffer;
+                    line_obj.model_bind_group = model_bind_group;
+                }
+            }
+        } else {
+            // Create new line object
+            let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gizmo Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertex_data),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+
+            let model_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Gizmo Model Buffer"),
+                contents: bytemuck::cast_slice(&[model_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+            if let Some(model_bind_group) = self.line_material.create_model_bind_group(&self.device, &model_buffer) {
+                self.gizmo_line_object = Some(LineObject {
+                    vertex_buffer,
+                    vertex_count: vertices.len() as u32,
+                    model_buffer,
+                    model_bind_group,
+                });
+            }
+        }
     }
 }
 

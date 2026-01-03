@@ -20,6 +20,7 @@ mod box3;
 mod frustum;
 mod triangle;
 mod line3;
+mod raycaster;
 
 pub use vector2::Vector2;
 pub use vector3::Vector3;
@@ -36,6 +37,7 @@ pub use box3::Box3;
 pub use frustum::Frustum;
 pub use triangle::Triangle;
 pub use line3::Line3;
+pub use raycaster::Raycaster;
 
 /// Common math constants and utilities.
 pub mod consts {

@@ -214,4 +214,26 @@ impl OrbitControls {
         self.pan_offset = Vector3::ZERO;
         self.scale = 1.0;
     }
+
+    /// Reset internal state to match current camera position.
+    pub fn reset_to_camera(&mut self, camera: &PerspectiveCamera) {
+        // Compute offset from target to camera
+        let offset = camera.position - self.target;
+        let radius = offset.length();
+
+        // Compute spherical coordinates
+        let phi = if radius > 0.0 {
+            (offset.y / radius).acos()
+        } else {
+            std::f32::consts::FRAC_PI_2
+        };
+
+        let theta = offset.z.atan2(offset.x);
+
+        // Update internal state
+        self.spherical_target = SphericalCoords { radius, phi, theta };
+        self.spherical_delta = SphericalDelta::default();
+        self.pan_offset = Vector3::ZERO;
+        self.scale = 1.0;
+    }
 }

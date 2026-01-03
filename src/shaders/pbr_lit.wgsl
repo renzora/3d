@@ -12,6 +12,10 @@ const MAX_CASCADES: u32 = 4u;
 const LIGHT_POINT: u32 = 0u;
 const LIGHT_DIRECTIONAL: u32 = 1u;
 const LIGHT_SPOT: u32 = 2u;
+const LIGHT_RECT: u32 = 3u;
+const LIGHT_CAPSULE: u32 = 4u;
+const LIGHT_DISK: u32 = 5u;
+const LIGHT_SPHERE: u32 = 6u;
 
 // PCF modes
 const PCF_NONE: u32 = 0u;
@@ -45,9 +49,10 @@ struct Light {
     intensity: f32,
     direction: vec3<f32>,
     range: f32,
-    inner_cone_cos: f32,
-    outer_cone_cos: f32,
-    _padding: vec2<f32>,
+    inner_cone_cos: f32,  // or width for rect lights
+    outer_cone_cos: f32,  // or height for rect lights
+    tangent: vec3<f32>,   // tangent vector for rect lights
+    flags: u32,           // bit 0: two-sided for rect lights
 }
 
 struct LightsUniform {

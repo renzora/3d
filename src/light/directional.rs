@@ -99,7 +99,8 @@ impl Light for DirectionalLight {
             range: 0.0, // Infinite
             inner_cone_cos: 0.0,
             outer_cone_cos: 0.0,
-            _padding: [0.0; 2],
+            tangent: [0.0, 0.0, 0.0], // Not used for directional
+            flags: 0,
         }
     }
 }

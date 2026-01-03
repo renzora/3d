@@ -7,6 +7,7 @@ use crate::texture::{Sampler, Texture2D};
 use bytemuck::{Pod, Zeroable};
 
 /// Material uniform for textured PBR.
+/// Size: 80 bytes (aligned for WGSL vec3 at 16-byte boundary)
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct TexturedPbrMaterialUniform {
@@ -18,14 +19,24 @@ pub struct TexturedPbrMaterialUniform {
     pub roughness: f32,
     /// Ambient occlusion.
     pub ao: f32,
+    /// Clear coat intensity (0 = none, 1 = full).
+    pub clear_coat: f32,
+    /// Clear coat roughness (typically very low, e.g., 0.03).
+    pub clear_coat_roughness: f32,
+    /// Sheen/cloth intensity (0 = none, 1 = full cloth).
+    pub sheen: f32,
     /// Whether to use albedo map (1.0 = yes).
     pub use_albedo_map: f32,
     /// Whether to use normal map (1.0 = yes).
     pub use_normal_map: f32,
     /// Whether to use metallic-roughness map (1.0 = yes).
     pub use_metallic_roughness_map: f32,
-    /// Padding.
-    pub _padding: [f32; 2],
+    /// Padding to align sheen_color to 16-byte boundary (WGSL vec3 alignment).
+    pub _padding1: [f32; 3],
+    /// Sheen/fuzz color RGB.
+    pub sheen_color: [f32; 3],
+    /// Padding to reach 80 bytes total.
+    pub _padding2: f32,
 }
 
 impl Default for TexturedPbrMaterialUniform {
@@ -35,10 +46,15 @@ impl Default for TexturedPbrMaterialUniform {
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            sheen: 0.0,
             use_albedo_map: 0.0,
             use_normal_map: 0.0,
             use_metallic_roughness_map: 0.0,
-            _padding: [0.0; 2],
+            _padding1: [0.0; 3],
+            sheen_color: [1.0, 1.0, 1.0],
+            _padding2: 0.0,
         }
     }
 }
@@ -57,6 +73,14 @@ pub struct TexturedPbrMaterial {
     pub roughness: f32,
     /// Ambient occlusion.
     pub ao: f32,
+    /// Clear coat intensity (0 = none, 1 = full).
+    pub clear_coat: f32,
+    /// Clear coat roughness (typically very low, e.g., 0.03).
+    pub clear_coat_roughness: f32,
+    /// Sheen/cloth intensity (0 = none, 1 = full cloth).
+    pub sheen: f32,
+    /// Sheen/fuzz color.
+    pub sheen_color: Color,
     /// Albedo texture.
     albedo_texture: Option<Texture2D>,
     /// Normal map texture.
@@ -98,6 +122,10 @@ impl TexturedPbrMaterial {
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
+            clear_coat: 0.0,
+            clear_coat_roughness: 0.03,
+            sheen: 0.0,
+            sheen_color: Color::WHITE,
             albedo_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
@@ -178,10 +206,15 @@ impl TexturedPbrMaterial {
             metallic: self.metallic,
             roughness: self.roughness,
             ao: self.ao,
+            clear_coat: self.clear_coat,
+            clear_coat_roughness: self.clear_coat_roughness,
+            sheen: self.sheen,
             use_albedo_map: if self.albedo_texture.is_some() { 1.0 } else { 0.0 },
             use_normal_map: if self.normal_texture.is_some() { 1.0 } else { 0.0 },
             use_metallic_roughness_map: if self.metallic_roughness_texture.is_some() { 1.0 } else { 0.0 },
-            _padding: [0.0; 2],
+            _padding1: [0.0; 3],
+            sheen_color: [self.sheen_color.r, self.sheen_color.g, self.sheen_color.b],
+            _padding2: 0.0,
         }
     }
 
@@ -427,6 +460,24 @@ impl TexturedPbrMaterial {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Detail albedo map (binding 19)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 19,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Detail albedo sampler (binding 20)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 20,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -566,6 +617,8 @@ impl TexturedPbrMaterial {
         irradiance_sampler: &wgpu::Sampler,
         detail_normal_view: &wgpu::TextureView,
         detail_normal_sampler: &wgpu::Sampler,
+        detail_albedo_view: &wgpu::TextureView,
+        detail_albedo_sampler: &wgpu::Sampler,
     ) -> Option<wgpu::BindGroup> {
         self.texture_bind_group_layout.as_ref().map(|layout| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -654,6 +707,14 @@ impl TexturedPbrMaterial {
                     wgpu::BindGroupEntry {
                         binding: 18,
                         resource: wgpu::BindingResource::Sampler(detail_normal_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 19,
+                        resource: wgpu::BindingResource::TextureView(detail_albedo_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 20,
+                        resource: wgpu::BindingResource::Sampler(detail_albedo_sampler),
                     },
                 ],
             })

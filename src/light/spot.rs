@@ -155,7 +155,8 @@ impl Light for SpotLight {
             range: self.range,
             inner_cone_cos: self.inner_angle.cos(),
             outer_cone_cos: self.outer_angle.cos(),
-            _padding: [0.0; 2],
+            tangent: [0.0, 0.0, 0.0], // Not used for spot
+            flags: 0,
         }
     }
 }

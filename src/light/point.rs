@@ -82,7 +82,8 @@ impl Light for PointLight {
             range: self.range,
             inner_cone_cos: 0.0,
             outer_cone_cos: 0.0,
-            _padding: [0.0; 2],
+            tangent: [0.0, 0.0, 0.0], // Not used for point
+            flags: 0,
         }
     }
 }

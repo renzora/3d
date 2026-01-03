@@ -91,14 +91,22 @@ impl Context {
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
-        // Request device
+        // Request device with higher storage buffer limits for Nanite
+        let adapter_limits = adapter.limits();
+        let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults()
+            .using_resolution(adapter_limits.clone());
+
+        // Request higher storage buffer limit for Nanite (default is 128MB, need 256MB+)
+        required_limits.max_storage_buffer_binding_size = adapter_limits
+            .max_storage_buffer_binding_size
+            .max(256 * 1024 * 1024);
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Ren Device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
+                    required_limits,
                     memory_hints: Default::default(),
                 },
                 None,
