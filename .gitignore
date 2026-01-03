@@ -13,3 +13,6 @@ Thumbs.db
 
 # WASM output (regenerated on build)
 /web/pkg/
+
+# Claude
+.claude/
