@@ -9,12 +9,12 @@ use wgpu::util::DeviceExt;
 use bytemuck;
 
 use crate::core::Clock;
-use crate::math::{Color, Euler, EulerOrder, Matrix3, Matrix4, Quaternion, Vector3};
-use crate::material::{TexturedPbrMaterial, TexturedPbrMaterialUniform, LineMaterial, LineModelUniform, PbrCameraUniform, PbrModelUniform};
+use crate::math::{Color, Euler, EulerOrder, Matrix4, Quaternion, Vector3};
+use crate::material::{LineMaterial, LineModelUniform, PbrCameraUniform};
 use crate::texture::{BrdfLut, Texture2D, Sampler};
 use crate::camera::PerspectiveCamera;
 use crate::controls::OrbitControls;
-use crate::helpers::{AxesHelper, GridHelper, GizmoAxis, GizmoDragResult, GizmoMode, TransformGizmo};
+use crate::helpers::{AxesHelper, GridHelper, GizmoAxis, GizmoMode, TransformGizmo};
 use crate::math::Raycaster;
 use crate::loaders::{GltfLoader, ObjLoader, LoadedScene};
 use crate::postprocessing::{TonemappingPass, TonemappingMode, BloomPass, BloomSettings, FxaaPass, FxaaQuality, SmaaPass, SmaaQuality, SsaoPass, SsaoQuality, GtaoPass, GtaoQuality, LumenPass, LumenQuality, SsrPass, SsrQuality, TaaPass, VignettePass, DofPass, DofQuality, MotionBlurPass, MotionBlurQuality, OutlinePass, OutlineMode, ColorCorrectionPass, SkyboxPass, ProceduralSkyPass, VolumetricFogPass, VolumetricFogQuality, AutoExposurePass, Pass};
@@ -23,7 +23,7 @@ use crate::shadows::{PCFMode, ShadowConfig};
 use crate::ibl::prefilter::generate_prefiltered_sky;
 use crate::ibl::irradiance::generate_sky_irradiance;
 use crate::illumination::ProbeVolume;
-use crate::nanite::{NaniteRenderer, NaniteConfig, build_clusters};
+use crate::nanite::{NaniteRenderer, NaniteConfig, build_clusters, NaniteMaterialGpu};
 use crate::geometry::Vertex;
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
@@ -103,20 +103,6 @@ pub struct RenderStats {
     pub frame: u64,
 }
 
-/// A renderable mesh with geometry buffers and transform.
-struct Mesh {
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    model_buffer: wgpu::Buffer,
-    model_bind_group: wgpu::BindGroup,
-    material_buffer: wgpu::Buffer,
-    material_bind_group: wgpu::BindGroup,
-    texture_bind_group: wgpu::BindGroup,
-    position: Vector3,
-    rotation: Vector3,
-    scale: Vector3,
-}
 
 /// Line renderable object.
 struct LineObject {
@@ -145,16 +131,15 @@ pub struct RenApp {
     width: u32,
     height: u32,
     // Rendering
-    material: TexturedPbrMaterial,
     line_material: LineMaterial,
+    // Camera bind group layout for particles (shared)
+    camera_bind_group_layout: wgpu::BindGroupLayout,
     camera: RefCell<PerspectiveCamera>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     line_camera_bind_group: wgpu::BindGroup,
     // Controls
     controls: RefCell<OrbitControls>,
-    // Meshes
-    meshes: Vec<Mesh>,
     // Line objects (grid, axes)
     line_objects: Vec<LineObject>,
     // Visibility flags for helpers
@@ -214,8 +199,6 @@ pub struct RenApp {
     shadow_map_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     shadow_uniform_buffer: wgpu::Buffer,
-    shadow_depth_pipeline: wgpu::RenderPipeline,
-    shadow_model_bind_group_layout: wgpu::BindGroupLayout,
     light_direction: [f32; 3],
     light_intensity: f32,
     light_color: [f32; 3],
@@ -265,16 +248,14 @@ pub struct RenApp {
     detail_albedo_blend_mode: u32,
     // Render mode: 0=Lit, 1=Unlit, 2=Normals, 3=Depth, 4=Metallic, 5=Roughness, 6=AO, 7=UVs, 8=Flat
     render_mode: u32,
-    // Wireframe rendering
-    wireframe_supported: bool,
-    wireframe_enabled: bool,
     // Particle systems
     particle_systems: Vec<crate::particles::ParticleSystem>,
     particle_sampler: wgpu::Sampler,
     // Nanite virtualized geometry
     nanite_renderer: Option<NaniteRenderer>,
-    nanite_enabled: bool,
     nanite_camera_bind_group: Option<wgpu::BindGroup>,
+    // Materials for primitives added via add_geometry
+    primitive_materials: Vec<NaniteMaterialGpu>,
     // Transform gizmo
     gizmo: TransformGizmo,
     gizmo_line_object: Option<LineObject>,
@@ -322,16 +303,6 @@ impl RenApp {
             .await
             .ok_or_else(|| JsValue::from_str("No suitable GPU adapter found"))?;
 
-        // Check if wireframe (polygon line mode) is supported
-        let adapter_features = adapter.features();
-        let wireframe_supported = adapter_features.contains(wgpu::Features::POLYGON_MODE_LINE);
-
-        let requested_features = if wireframe_supported {
-            wgpu::Features::POLYGON_MODE_LINE
-        } else {
-            wgpu::Features::empty()
-        };
-
         // Get adapter limits and request higher storage buffer size for Nanite
         let adapter_limits = adapter.limits();
         let mut required_limits = wgpu::Limits::downlevel_webgl2_defaults()
@@ -347,7 +318,7 @@ impl RenApp {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Ren Device"),
-                    required_features: requested_features,
+                    required_features: wgpu::Features::empty(),
                     required_limits,
                     memory_hints: Default::default(),
                 },
@@ -425,9 +396,20 @@ impl RenApp {
         });
         let depth_copy_view = depth_copy_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create material and pipeline (target HDR format for full precision)
-        let mut material = TexturedPbrMaterial::new();
-        material.build_pipeline(&device, &queue, hdr_format, depth_format, wireframe_supported);
+        // Create camera bind group layout (shared by particles)
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Camera Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         // Create line material and pipeline (also targets HDR format)
         let mut line_material = LineMaterial::new();
@@ -501,16 +483,18 @@ impl RenApp {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group = material
-            .create_camera_bind_group(&device, &camera_buffer)
-            .ok_or_else(|| JsValue::from_str("Failed to create camera bind group"))?;
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Camera Bind Group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
 
         let line_camera_bind_group = line_material
             .create_camera_bind_group(&device, &camera_buffer)
             .ok_or_else(|| JsValue::from_str("Failed to create line camera bind group"))?;
-
-        // Empty mesh list - models loaded via load_gltf/load_obj
-        let meshes = Vec::new();
 
         let clock = Clock::new();
 
@@ -891,119 +875,6 @@ impl RenApp {
         });
 
         // Create depth-only pipeline for shadow pass
-        let shadow_shader_source = r#"
-            struct LightUniform {
-                view_proj: mat4x4<f32>,
-            }
-            struct ModelUniform {
-                model: mat4x4<f32>,
-                normal: mat3x3<f32>,
-            }
-
-            @group(0) @binding(0) var<uniform> light: LightUniform;
-            @group(1) @binding(0) var<uniform> model: ModelUniform;
-
-            @vertex
-            fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-                return light.view_proj * model.model * vec4<f32>(position, 1.0);
-            }
-
-            @fragment
-            fn fs_main() {}
-        "#;
-
-        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow Depth Shader"),
-            source: wgpu::ShaderSource::Wgsl(shadow_shader_source.into()),
-        });
-
-        // Light uniform bind group layout (for shadow pass)
-        let shadow_light_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Light Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        // Model bind group layout for shadow pass
-        let shadow_model_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow Model Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&shadow_light_bind_group_layout, &shadow_model_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        // Vertex buffer layout matching the expanded vertex format (with barycentric coords)
-        let shadow_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: 44, // 3 floats pos + 3 floats normal + 2 floats uv + 3 floats bary = 11 floats = 44 bytes
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x3,
-                offset: 0,
-                shader_location: 0,
-            }],
-        };
-
-        let shadow_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow Depth Pipeline"),
-            layout: Some(&shadow_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shadow_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[shadow_vertex_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shadow_shader,
-                entry_point: Some("fs_main"),
-                targets: &[],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
         // Create light uniform buffer and bind group for shadow pass
         let light_uniform_data: [[f32; 4]; 4] = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
         let _shadow_light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1027,14 +898,13 @@ impl RenApp {
             frame_count: RefCell::new(0),
             width,
             height,
-            material,
             line_material,
+            camera_bind_group_layout,
             camera: RefCell::new(camera),
             camera_buffer,
             camera_bind_group,
             line_camera_bind_group,
             controls: RefCell::new(controls),
-            meshes,
             line_objects,
             show_grid: true,
             show_axes: true,
@@ -1095,8 +965,6 @@ impl RenApp {
             shadow_map_view,
             shadow_sampler,
             shadow_uniform_buffer,
-            shadow_depth_pipeline,
-            shadow_model_bind_group_layout,
             light_direction: [-0.5, -1.0, -0.3],
             light_intensity: 1.0,
             light_color: [1.0, 1.0, 1.0],
@@ -1133,72 +1001,17 @@ impl RenApp {
             detail_albedo_intensity: 0.3,
             detail_albedo_blend_mode: 0, // 0=overlay, 1=multiply, 2=soft_light
             render_mode: 0,
-            wireframe_supported,
-            wireframe_enabled: false,
             particle_systems: Vec::new(),
             particle_sampler,
             // Nanite will be lazily initialized when first mesh is added
             nanite_renderer: None,
-            nanite_enabled: true,
             nanite_camera_bind_group: None,
+            primitive_materials: Vec::new(),
             // Transform gizmo
             gizmo: TransformGizmo::new(),
             gizmo_line_object: None,
             gizmo_enabled: false,
             gizmo_target_mesh: None,
-        })
-    }
-
-    fn create_mesh_with_transform(
-        device: &wgpu::Device,
-        material: &TexturedPbrMaterial,
-        vertex_buffer: wgpu::Buffer,
-        index_buffer: wgpu::Buffer,
-        index_count: u32,
-        world_transform: &Matrix4,
-        mat_uniform: TexturedPbrMaterialUniform,
-        texture_bind_group: wgpu::BindGroup,
-    ) -> Result<Mesh, JsValue> {
-        // Compute normal matrix from world transform
-        let normal_matrix = Matrix3::from_matrix4_normal(world_transform);
-
-        let model_uniform = PbrModelUniform {
-            model: matrix4_to_array(world_transform),
-            normal: matrix3_to_padded_array(&normal_matrix),
-        };
-
-        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Model Buffer"),
-            contents: bytemuck::cast_slice(&[model_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let model_bind_group = material
-            .create_model_bind_group(device, &model_buffer)
-            .ok_or_else(|| JsValue::from_str("Failed to create model bind group"))?;
-
-        let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Material Buffer"),
-            contents: bytemuck::cast_slice(&[mat_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let material_bind_group = material
-            .create_material_bind_group(device, &material_buffer)
-            .ok_or_else(|| JsValue::from_str("Failed to create material bind group"))?;
-
-        Ok(Mesh {
-            vertex_buffer,
-            index_buffer,
-            index_count,
-            model_buffer,
-            model_bind_group,
-            material_buffer,
-            material_bind_group,
-            texture_bind_group,
-            position: Vector3::ZERO,
-            rotation: Vector3::ZERO,
-            scale: Vector3::ONE,
         })
     }
 
@@ -1596,25 +1409,7 @@ impl RenApp {
                             occlusion_query_set: None,
                         });
 
-                        shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
-                        shadow_pass.set_bind_group(0, &light_bind_group, &[]);
-
-                        // Render all meshes to this cube face
-                        for mesh in &self.meshes {
-                            let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("Shadow Cube Model Bind Group"),
-                                layout: &self.shadow_model_bind_group_layout,
-                                entries: &[wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: mesh.model_buffer.as_entire_binding(),
-                                }],
-                            });
-
-                            shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
-                            shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                            shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                        }
+                        // TODO: Add Nanite cube shadow rendering if needed
                     }
                 }
             } else {
@@ -1651,42 +1446,20 @@ impl RenApp {
                         occlusion_query_set: None,
                     });
 
-                    shadow_pass.set_pipeline(&self.shadow_depth_pipeline);
-                    shadow_pass.set_bind_group(0, &light_bind_group, &[]);
-
-                    // Render all meshes to shadow map
-                    for mesh in &self.meshes {
-                        let shadow_model_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Shadow Model Bind Group"),
-                            layout: &self.shadow_model_bind_group_layout,
-                            entries: &[wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: mesh.model_buffer.as_entire_binding(),
-                            }],
-                        });
-
-                        shadow_pass.set_bind_group(1, &shadow_model_bind_group, &[]);
-                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                    }
-
                     // Render Nanite geometry to shadow map
-                    if self.nanite_enabled {
-                        if let Some(ref nanite) = self.nanite_renderer {
-                            // Create light camera bind group for Nanite shadow pass
-                            let light_matrix_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Nanite Light Matrix Buffer"),
-                                contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
-                                usage: wgpu::BufferUsages::UNIFORM,
-                            });
-                            let light_camera_bind_group = nanite.create_light_camera_bind_group(
-                                &self.device,
-                                &light_matrix_buffer,
-                            );
-                            // render_shadow sets pipeline and draws
-                            nanite.render_shadow(&mut shadow_pass, &light_camera_bind_group);
-                        }
+                    if let Some(ref nanite) = self.nanite_renderer {
+                        // Create light camera bind group for Nanite shadow pass
+                        let light_matrix_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Nanite Light Matrix Buffer"),
+                            contents: bytemuck::cast_slice(&matrix4_to_array(&light_view_proj)),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        });
+                        let light_camera_bind_group = nanite.create_light_camera_bind_group(
+                            &self.device,
+                            &light_matrix_buffer,
+                        );
+                        // render_shadow sets pipeline and draws
+                        nanite.render_shadow(&mut shadow_pass, &light_camera_bind_group);
                     }
                 }
             }
@@ -1700,32 +1473,30 @@ impl RenApp {
         }
 
         // ========== Nanite GPU Culling (Compute Pass) ==========
-        if self.nanite_enabled {
-            if let Some(ref mut nanite) = self.nanite_renderer {
-                // Reset culling buffers for new frame
-                nanite.begin_frame(&self.queue);
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            // Reset culling buffers for new frame
+            nanite.begin_frame(&self.queue);
 
-                // Get camera data for culling
-                let mut camera = self.camera.borrow_mut();
-                let fov = camera.fov;
-                let view_proj = camera.view_projection_matrix().clone();
-                let camera_pos = camera.position;
-                drop(camera);
+            // Get camera data for culling
+            let mut camera = self.camera.borrow_mut();
+            let fov = camera.fov;
+            let view_proj = camera.view_projection_matrix().clone();
+            let camera_pos = camera.position;
+            drop(camera);
 
-                nanite.update_culling(
-                    &self.queue,
-                    &view_proj,
-                    [camera_pos.x, camera_pos.y, camera_pos.z],
-                    self.height as f32,
-                    fov,
-                );
+            nanite.update_culling(
+                &self.queue,
+                &view_proj,
+                [camera_pos.x, camera_pos.y, camera_pos.z],
+                self.height as f32,
+                fov,
+            );
 
-                // Two-phase culling:
-                // 1. Frustum cull → frustum_clusters_buffer
-                nanite.cull_frustum(&mut encoder);
-                // 2. Occlusion cull (using previous frame's HZB) → visible_clusters_buffer
-                nanite.cull_occlusion(&mut encoder);
-            }
+            // Two-phase culling:
+            // 1. Frustum cull → frustum_clusters_buffer
+            nanite.cull_frustum(&mut encoder);
+            // 2. Occlusion cull (using previous frame's HZB) → visible_clusters_buffer
+            nanite.cull_occlusion(&mut encoder);
         }
 
         {
@@ -1759,27 +1530,6 @@ impl RenApp {
                     self.procedural_sky.render(&mut render_pass);
                 } else if self.skybox_enabled {
                     self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
-                }
-            }
-
-            // Render PBR meshes (use wireframe pipeline if enabled and available)
-            let pipeline_to_use = if self.wireframe_enabled {
-                self.material.wireframe_pipeline().or_else(|| self.material.pipeline())
-            } else {
-                self.material.pipeline()
-            };
-
-            if let Some(pipeline) = pipeline_to_use {
-                render_pass.set_pipeline(pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-
-                for mesh in &self.meshes {
-                    render_pass.set_bind_group(1, &mesh.model_bind_group, &[]);
-                    render_pass.set_bind_group(2, &mesh.material_bind_group, &[]);
-                    render_pass.set_bind_group(3, &mesh.texture_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
 
@@ -1819,71 +1569,65 @@ impl RenApp {
 
         // ========== Nanite Visibility Pass ==========
         // Render cluster/triangle IDs to visibility buffer
-        if self.nanite_enabled {
-            if let Some(ref nanite) = self.nanite_renderer {
-                if nanite.cluster_count() > 0 {
-                    let mut visibility_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Nanite Visibility Pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: nanite.visibility_view(),
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &self.depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Load, // Keep existing depth
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
+        if let Some(ref nanite) = self.nanite_renderer {
+            if nanite.cluster_count() > 0 {
+                let mut visibility_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Nanite Visibility Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: nanite.visibility_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // Keep existing depth
+                            store: wgpu::StoreOp::Store,
                         }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-                    if let Some(ref camera_bg) = self.nanite_camera_bind_group {
-                        nanite.render_visibility(&mut visibility_pass, camera_bg);
-                    }
+                if let Some(ref camera_bg) = self.nanite_camera_bind_group {
+                    nanite.render_visibility(&mut visibility_pass, camera_bg);
                 }
             }
         }
 
         // ========== Nanite HZB Build (Compute Pass) ==========
         // Build hierarchical Z-buffer from depth for next frame's occlusion culling
-        if self.nanite_enabled {
-            if let Some(ref nanite) = self.nanite_renderer {
-                if nanite.cluster_count() > 0 {
-                    nanite.build_hzb(&mut encoder, &self.queue, self.width, self.height);
-                }
+        if let Some(ref nanite) = self.nanite_renderer {
+            if nanite.cluster_count() > 0 {
+                nanite.build_hzb(&mut encoder, &self.queue, self.width, self.height);
             }
         }
 
         // ========== Nanite Material Pass ==========
         // Shade pixels using visibility buffer data
-        if self.nanite_enabled {
-            if let Some(ref nanite) = self.nanite_renderer {
-                if nanite.cluster_count() > 0 {
-                    let mut material_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Nanite Material Pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.scene_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load, // Keep existing scene content
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None, // Reading depth via texture
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+        if let Some(ref nanite) = self.nanite_renderer {
+            if nanite.cluster_count() > 0 {
+                let mut material_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Nanite Material Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // Keep existing scene content
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, // Reading depth via texture
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-                    if let Some(ref camera_bg) = self.nanite_camera_bind_group {
-                        nanite.render_material(&mut material_pass, camera_bg);
-                    }
+                if let Some(ref camera_bg) = self.nanite_camera_bind_group {
+                    nanite.render_material(&mut material_pass, camera_bg);
                 }
             }
         }
@@ -2445,9 +2189,13 @@ impl RenApp {
     /// Get render statistics.
     #[wasm_bindgen]
     pub fn stats(&self) -> RenderStats {
+        let (draw_calls, triangles) = self.nanite_renderer
+            .as_ref()
+            .map(|n| (n.cluster_count() as u32, n.triangle_count() as u32))
+            .unwrap_or((0, 0));
         RenderStats {
-            draw_calls: self.meshes.len() as u32,
-            triangles: self.meshes.iter().map(|m| m.index_count / 3).sum(),
+            draw_calls,
+            triangles,
             frame: *self.frame_count.borrow(),
         }
     }
@@ -2582,253 +2330,84 @@ impl RenApp {
         controls.reset_to_camera(&camera);
     }
 
-    /// Load a GLTF/GLB model from bytes.
+    /// Load a GLTF/GLB model from bytes (uses Nanite pipeline).
     #[wasm_bindgen]
     pub fn load_gltf(&mut self, data: &[u8]) -> Result<u32, JsValue> {
-        let loader = GltfLoader::new();
-        let scene = loader.load_from_bytes(data)
-            .map_err(|e| JsValue::from_str(&format!("Failed to load GLTF: {}", e)))?;
-
-        self.add_loaded_scene(&scene)
+        self.load_gltf_nanite(data)
     }
 
-    /// Load a Wavefront OBJ model from string.
+    /// Load a Wavefront OBJ model from string (uses Nanite pipeline).
     #[wasm_bindgen]
     pub fn load_obj(&mut self, content: &str) -> Result<u32, JsValue> {
+        self.load_obj_nanite(content)
+    }
+
+    /// Load a Wavefront OBJ model as Nanite geometry.
+    fn load_obj_nanite(&mut self, content: &str) -> Result<u32, JsValue> {
+        self.ensure_nanite_initialized();
+
         let loader = ObjLoader::new();
         let scene = loader.load_from_str(content)
             .map_err(|e| JsValue::from_str(&format!("Failed to load OBJ: {}", e)))?;
 
-        self.add_loaded_scene(&scene)
-    }
+        let config = NaniteConfig::default();
+        let mut loaded_count = 0u32;
 
-    /// Add a loaded scene to the renderer, returns number of meshes added.
-    fn add_loaded_scene(&mut self, scene: &LoadedScene) -> Result<u32, JsValue> {
-        use crate::math::Quaternion;
-
-        // Compute world transforms for each mesh by walking the node hierarchy
-        let mut mesh_transforms: Vec<Option<Matrix4>> = vec![None; scene.meshes.len()];
-
-        // Recursive function to compute world transforms
-        fn process_node(
-            node_idx: usize,
-            parent_transform: &Matrix4,
-            scene: &LoadedScene,
-            mesh_transforms: &mut [Option<Matrix4>],
-        ) {
-            if let Some(node) = scene.nodes.get(node_idx) {
-                // Compute local transform
-                let t = &node.translation;
-                let r = &node.rotation;
-                let s = &node.scale;
-
-                let local_transform = Matrix4::compose(
-                    &Vector3::new(t[0], t[1], t[2]),
-                    &Quaternion::new(r[0], r[1], r[2], r[3]),
-                    &Vector3::new(s[0], s[1], s[2]),
-                );
-
-                // World transform = parent * local
-                let world_transform = parent_transform.multiply(&local_transform);
-
-                // Assign world transform to all meshes in this node
-                for &mesh_idx in &node.mesh_indices {
-                    if mesh_idx < mesh_transforms.len() {
-                        mesh_transforms[mesh_idx] = Some(world_transform.clone());
-                    }
-                }
-
-                // Process children
-                for &child_idx in &node.children {
-                    process_node(child_idx, &world_transform, scene, mesh_transforms);
-                }
-            }
-        }
-
-        // Start from root nodes with identity transform
-        let identity = Matrix4::identity();
-        for &root_idx in &scene.root_nodes {
-            process_node(root_idx, &identity, scene, &mut mesh_transforms);
-        }
-
-        // Load textures from scene into GPU textures (already decoded as RGBA8)
-        let mut gpu_textures: HashMap<String, Texture2D> = HashMap::new();
-        for (name, loaded_tex) in &scene.textures {
-            let texture = Texture2D::from_rgba8(
-                &self.device,
-                &self.queue,
-                &loaded_tex.data,
-                loaded_tex.width,
-                loaded_tex.height,
-                Some(name),
-            );
-            gpu_textures.insert(name.clone(), texture);
-        }
-
-        let mut added = 0u32;
-
-        for (mesh_idx, loaded_mesh) in scene.meshes.iter().enumerate() {
+        for loaded_mesh in &scene.meshes {
             let geometry = &loaded_mesh.geometry;
 
-            // Build vertex data with barycentric coordinates for wireframe rendering
-            // We need to expand indexed geometry to give each triangle unique barycentric coords
-            // Vertex format: position(3) + normal(3) + uv(2) + barycentric(3) = 11 floats
-            let bary_coords = [
-                [1.0f32, 0.0, 0.0], // First vertex of triangle
-                [0.0f32, 1.0, 0.0], // Second vertex
-                [0.0f32, 0.0, 1.0], // Third vertex
-            ];
-
-            let triangle_count = geometry.indices.len() / 3;
-            let mut vertex_data = Vec::with_capacity(triangle_count * 3 * 11);
-            let mut new_indices: Vec<u32> = Vec::with_capacity(triangle_count * 3);
-
-            for tri in 0..triangle_count {
-                for v in 0..3 {
-                    let idx = geometry.indices[tri * 3 + v] as usize;
-                    let pos = geometry.positions[idx];
-                    let normal = geometry.normals.get(idx).copied().unwrap_or([0.0, 1.0, 0.0]);
-                    let uv = geometry.uvs.get(idx).copied().unwrap_or([0.0, 0.0]);
-                    let bary = bary_coords[v];
-
-                    vertex_data.extend_from_slice(&pos);
-                    vertex_data.extend_from_slice(&normal);
-                    vertex_data.extend_from_slice(&uv);
-                    vertex_data.extend_from_slice(&bary);
-
-                    new_indices.push((tri * 3 + v) as u32);
-                }
+            // Convert to Vertex format
+            let mut vertices: Vec<Vertex> = Vec::with_capacity(geometry.positions.len());
+            for i in 0..geometry.positions.len() {
+                let pos = geometry.positions[i];
+                let normal = geometry.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
+                vertices.push(Vertex {
+                    position: pos,
+                    normal,
+                    uv: geometry.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                    barycentric: [0.0, 0.0, 0.0],
+                });
             }
 
-            let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("Mesh {} Vertex Buffer", loaded_mesh.name)),
-                contents: bytemuck::cast_slice(&vertex_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            // Build clusters
+            let result = build_clusters(
+                &vertices,
+                &geometry.indices,
+                config.triangles_per_cluster,
+                loaded_mesh.material_index.unwrap_or(0) as u32,
+            );
 
-            let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("Mesh {} Index Buffer", loaded_mesh.name)),
-                contents: bytemuck::cast_slice(&new_indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-            // Get material properties
-            let material_data = loaded_mesh.material_index
-                .and_then(|i| scene.materials.get(i));
-
-            let base_color = material_data
-                .map(|m| m.base_color)
-                .unwrap_or([0.8, 0.8, 0.8, 1.0]);
-
-            let metallic = material_data
-                .map(|m| m.metallic)
-                .unwrap_or(0.0);
-
-            let roughness = material_data
-                .map(|m| m.roughness)
-                .unwrap_or(0.5);
-
-            // Check for textures
-            let albedo_texture_name = material_data
-                .and_then(|m| m.base_color_texture.as_ref());
-            let normal_texture_name = material_data
-                .and_then(|m| m.normal_texture.as_ref());
-            let mr_texture_name = material_data
-                .and_then(|m| m.metallic_roughness_texture.as_ref());
-
-            let has_albedo = albedo_texture_name.is_some() &&
-                albedo_texture_name.map(|n| gpu_textures.contains_key(n)).unwrap_or(false);
-            let has_normal = normal_texture_name.is_some() &&
-                normal_texture_name.map(|n| gpu_textures.contains_key(n)).unwrap_or(false);
-            let has_mr = mr_texture_name.is_some() &&
-                mr_texture_name.map(|n| gpu_textures.contains_key(n)).unwrap_or(false);
-
-            let mat_uniform = TexturedPbrMaterialUniform {
-                base_color,
-                metallic,
-                roughness,
-                ao: 1.0,
-                clear_coat: 0.0,
-                clear_coat_roughness: 0.03,
-                sheen: 0.0,
-                use_albedo_map: if has_albedo { 1.0 } else { 0.0 },
-                use_normal_map: if has_normal { 1.0 } else { 0.0 },
-                use_metallic_roughness_map: if has_mr { 1.0 } else { 0.0 },
-                _padding1: [0.0; 3],
-                sheen_color: [1.0, 1.0, 1.0],
-                _padding2: 0.0,
-            };
-
-            // Get textures or use defaults
-            let albedo_tex = albedo_texture_name
-                .and_then(|n| gpu_textures.get(n))
-                .unwrap_or(&self.white_texture);
-            let normal_tex = normal_texture_name
-                .and_then(|n| gpu_textures.get(n))
-                .unwrap_or(&self.normal_texture);
-            let mr_tex = mr_texture_name
-                .and_then(|n| gpu_textures.get(n))
-                .unwrap_or(&self.white_texture);
-
-            // Create combined texture + shadow + env + BRDF + irradiance + detail bind group
-            let texture_bind_group = self.material
-                .create_texture_shadow_bind_group(
-                    &self.device,
-                    albedo_tex,
-                    &self.default_sampler,
-                    normal_tex,
-                    &self.default_sampler,
-                    mr_tex,
-                    &self.default_sampler,
-                    &self.shadow_uniform_buffer,
-                    &self.shadow_map_view,
-                    &self.shadow_sampler,
-                    &self.shadow_cube_map_view,
-                    &self.shadow_cube_sampler,
-                    &self.prefiltered_env_view,  // Use prefiltered env map for IBL
-                    &self.skybox_sampler,
-                    self.brdf_lut.view(),
-                    self.brdf_lut.sampler(),
-                    &self.irradiance_view,
-                    &self.skybox_sampler,
-                    self.detail_normal_map.view(),
-                    self.detail_normal_map.sampler(),
-                    self.detail_albedo_map.view(),
-                    self.detail_albedo_map.sampler(),
-                )
-                .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
-
-            // Get the world transform for this mesh, or use identity
-            let world_transform = mesh_transforms[mesh_idx].clone().unwrap_or_else(Matrix4::identity);
-
-            let mesh = Self::create_mesh_with_transform(
-                &self.device,
-                &self.material,
-                vertex_buffer,
-                index_buffer,
-                new_indices.len() as u32,
-                &world_transform,
-                mat_uniform,
-                texture_bind_group,
-            )?;
-
-            self.meshes.push(mesh);
-            added += 1;
+            // Register with Nanite renderer
+            if let Some(ref mut nanite) = self.nanite_renderer {
+                nanite.register_mesh(&self.device, &self.queue, result);
+                loaded_count += 1;
+            }
         }
 
-        Ok(added)
+        // Update instances with identity transform for each mesh
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let identity = Matrix4::identity();
+            let instances: Vec<(usize, Matrix4)> = (0..nanite.mesh_count())
+                .map(|i| (i, identity.clone()))
+                .collect();
+            nanite.update_instances(&self.queue, &instances);
+        }
+
+        Ok(loaded_count)
     }
 
-    /// Clear all loaded meshes.
+    /// Clear all loaded Nanite meshes.
     #[wasm_bindgen]
     pub fn clear_loaded_meshes(&mut self) {
-        self.meshes.clear();
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            nanite.clear_meshes();
+        }
     }
 
-    /// Get total mesh count.
+    /// Get total Nanite cluster count.
     #[wasm_bindgen]
     pub fn mesh_count(&self) -> u32 {
-        self.meshes.len() as u32
+        self.nanite_renderer.as_ref().map(|n| n.cluster_count() as u32).unwrap_or(0)
     }
 
     /// Enable or disable bloom effect.
@@ -2955,24 +2534,6 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn get_render_mode(&self) -> u32 {
         self.render_mode
-    }
-
-    /// Enable or disable wireframe rendering.
-    #[wasm_bindgen]
-    pub fn set_wireframe_enabled(&mut self, enabled: bool) {
-        self.wireframe_enabled = enabled;
-    }
-
-    /// Check if wireframe rendering is enabled.
-    #[wasm_bindgen]
-    pub fn is_wireframe_enabled(&self) -> bool {
-        self.wireframe_enabled
-    }
-
-    /// Check if wireframe rendering is supported on this device.
-    #[wasm_bindgen]
-    pub fn is_wireframe_supported(&self) -> bool {
-        self.wireframe_supported
     }
 
     /// Enable or disable FXAA anti-aliasing (legacy, use set_aa_mode instead).
@@ -4365,26 +3926,26 @@ impl RenApp {
     /// Add demo shapes to showcase bloom effect.
     #[wasm_bindgen]
     pub fn add_demo_shapes(&mut self) -> Result<(), JsValue> {
-        // Create several cubes with different materials
+        // Create several cubes - size 2.0 to match 1 floor tile unit
         let shapes = [
             // Bright emissive cubes (will bloom)
-            ([-2.0, 0.5, 0.0], [1.5, 0.3, 0.1, 1.0], 0.0, 0.3),   // Bright red/orange
-            ([0.0, 0.5, -2.0], [0.2, 1.5, 0.3, 1.0], 0.0, 0.3),   // Bright green
-            ([2.0, 0.5, 0.0], [0.2, 0.4, 1.5, 1.0], 0.0, 0.3),    // Bright blue
-            ([0.0, 0.5, 2.0], [1.5, 1.2, 0.2, 1.0], 0.0, 0.3),    // Bright yellow
-            // Center metallic sphere-ish cube
+            ([-4.0, 1.0, 0.0], [1.5, 0.3, 0.1, 1.0], 0.0, 0.3),   // Bright red/orange
+            ([0.0, 1.0, -4.0], [0.2, 1.5, 0.3, 1.0], 0.0, 0.3),   // Bright green
+            ([4.0, 1.0, 0.0], [0.2, 0.4, 1.5, 1.0], 0.0, 0.3),    // Bright blue
+            ([0.0, 1.0, 4.0], [1.5, 1.2, 0.2, 1.0], 0.0, 0.3),    // Bright yellow
+            // Center metallic cube
             ([0.0, 1.0, 0.0], [0.9, 0.9, 0.95, 1.0], 1.0, 0.1),   // Chrome
             // Dark contrast cubes
-            ([-1.0, 0.3, -1.0], [0.15, 0.15, 0.15, 1.0], 0.0, 0.8), // Dark gray
-            ([1.0, 0.3, 1.0], [0.15, 0.15, 0.15, 1.0], 0.0, 0.8),   // Dark gray
+            ([-2.0, 1.0, -2.0], [0.15, 0.15, 0.15, 1.0], 0.0, 0.8), // Dark gray
+            ([2.0, 1.0, 2.0], [0.15, 0.15, 0.15, 1.0], 0.0, 0.8),   // Dark gray
         ];
 
         for (pos, color, metallic, roughness) in shapes {
-            self.add_cube(pos, 0.6, color, metallic, roughness)?;
+            self.add_cube(pos, 2.0, color, metallic, roughness)?;
         }
 
         // Add a bright white sphere in the center top
-        self.add_sphere([0.0, 2.5, 0.0], 0.4, [2.0, 2.0, 2.0, 1.0], 0.0, 0.2)?;
+        self.add_sphere([0.0, 3.0, 0.0], 0.8, [2.0, 2.0, 2.0, 1.0], 0.0, 0.2)?;
 
         Ok(())
     }
@@ -4401,37 +3962,38 @@ impl RenApp {
         let s = size / 2.0;
 
         // Cube vertices: position (3) + normal (3) + uv (2) = 8 floats per vertex
+        // UVs 0-0.5 to show exactly 1 tile per face (texture has 2x2 tiles)
         #[rustfmt::skip]
         let vertices: Vec<f32> = vec![
             // Front face
-            -s, -s,  s,  0.0, 0.0, 1.0,  0.0, 1.0,
-             s, -s,  s,  0.0, 0.0, 1.0,  1.0, 1.0,
-             s,  s,  s,  0.0, 0.0, 1.0,  1.0, 0.0,
+            -s, -s,  s,  0.0, 0.0, 1.0,  0.0, 0.5,
+             s, -s,  s,  0.0, 0.0, 1.0,  0.5, 0.5,
+             s,  s,  s,  0.0, 0.0, 1.0,  0.5, 0.0,
             -s,  s,  s,  0.0, 0.0, 1.0,  0.0, 0.0,
             // Back face
-             s, -s, -s,  0.0, 0.0, -1.0,  0.0, 1.0,
-            -s, -s, -s,  0.0, 0.0, -1.0,  1.0, 1.0,
-            -s,  s, -s,  0.0, 0.0, -1.0,  1.0, 0.0,
+             s, -s, -s,  0.0, 0.0, -1.0,  0.0, 0.5,
+            -s, -s, -s,  0.0, 0.0, -1.0,  0.5, 0.5,
+            -s,  s, -s,  0.0, 0.0, -1.0,  0.5, 0.0,
              s,  s, -s,  0.0, 0.0, -1.0,  0.0, 0.0,
             // Top face
-            -s,  s,  s,  0.0, 1.0, 0.0,  0.0, 1.0,
-             s,  s,  s,  0.0, 1.0, 0.0,  1.0, 1.0,
-             s,  s, -s,  0.0, 1.0, 0.0,  1.0, 0.0,
+            -s,  s,  s,  0.0, 1.0, 0.0,  0.0, 0.5,
+             s,  s,  s,  0.0, 1.0, 0.0,  0.5, 0.5,
+             s,  s, -s,  0.0, 1.0, 0.0,  0.5, 0.0,
             -s,  s, -s,  0.0, 1.0, 0.0,  0.0, 0.0,
             // Bottom face
-            -s, -s, -s,  0.0, -1.0, 0.0,  0.0, 1.0,
-             s, -s, -s,  0.0, -1.0, 0.0,  1.0, 1.0,
-             s, -s,  s,  0.0, -1.0, 0.0,  1.0, 0.0,
+            -s, -s, -s,  0.0, -1.0, 0.0,  0.0, 0.5,
+             s, -s, -s,  0.0, -1.0, 0.0,  0.5, 0.5,
+             s, -s,  s,  0.0, -1.0, 0.0,  0.5, 0.0,
             -s, -s,  s,  0.0, -1.0, 0.0,  0.0, 0.0,
             // Right face
-             s, -s,  s,  1.0, 0.0, 0.0,  0.0, 1.0,
-             s, -s, -s,  1.0, 0.0, 0.0,  1.0, 1.0,
-             s,  s, -s,  1.0, 0.0, 0.0,  1.0, 0.0,
+             s, -s,  s,  1.0, 0.0, 0.0,  0.0, 0.5,
+             s, -s, -s,  1.0, 0.0, 0.0,  0.5, 0.5,
+             s,  s, -s,  1.0, 0.0, 0.0,  0.5, 0.0,
              s,  s,  s,  1.0, 0.0, 0.0,  0.0, 0.0,
             // Left face
-            -s, -s, -s,  -1.0, 0.0, 0.0,  0.0, 1.0,
-            -s, -s,  s,  -1.0, 0.0, 0.0,  1.0, 1.0,
-            -s,  s,  s,  -1.0, 0.0, 0.0,  1.0, 0.0,
+            -s, -s, -s,  -1.0, 0.0, 0.0,  0.0, 0.5,
+            -s, -s,  s,  -1.0, 0.0, 0.0,  0.5, 0.5,
+            -s,  s,  s,  -1.0, 0.0, 0.0,  0.5, 0.0,
             -s,  s, -s,  -1.0, 0.0, 0.0,  0.0, 0.0,
         ];
 
@@ -4542,7 +4104,7 @@ impl RenApp {
         self.add_geometry(&vertices, &indices, [0.0, y, 0.0], [r, g, b, 1.0], metallic, roughness)
     }
 
-    /// Internal helper to add geometry with material.
+    /// Internal helper to add geometry with material (uses Nanite pipeline).
     fn add_geometry(
         &mut self,
         vertices: &[f32],
@@ -4552,104 +4114,51 @@ impl RenApp {
         metallic: f32,
         roughness: f32,
     ) -> Result<(), JsValue> {
-        // Expand indexed geometry with barycentric coordinates for wireframe
-        // Input vertices: 8 floats per vertex (pos3 + normal3 + uv2)
-        // Output vertices: 11 floats per vertex (pos3 + normal3 + uv2 + bary3)
-        let bary_coords = [
-            [1.0f32, 0.0, 0.0],
-            [0.0f32, 1.0, 0.0],
-            [0.0f32, 0.0, 1.0],
-        ];
+        self.ensure_nanite_initialized();
 
-        let triangle_count = indices.len() / 3;
-        let mut expanded_vertices: Vec<f32> = Vec::with_capacity(triangle_count * 3 * 11);
-        let mut new_indices: Vec<u32> = Vec::with_capacity(triangle_count * 3);
-
-        for tri in 0..triangle_count {
-            for v in 0..3 {
-                let idx = indices[tri * 3 + v] as usize;
-                let base = idx * 8; // 8 floats per input vertex
-
-                // Copy position (3), normal (3), uv (2)
-                expanded_vertices.extend_from_slice(&vertices[base..base + 8]);
-                // Add barycentric
-                expanded_vertices.extend_from_slice(&bary_coords[v]);
-
-                new_indices.push((tri * 3 + v) as u32);
-            }
-        }
-
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Shape Vertex Buffer"),
-            contents: bytemuck::cast_slice(&expanded_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Shape Index Buffer"),
-            contents: bytemuck::cast_slice(&new_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let mat_uniform = TexturedPbrMaterialUniform {
+        // Create material for this geometry
+        let material_id = self.primitive_materials.len() as u32;
+        self.primitive_materials.push(NaniteMaterialGpu {
             base_color: color,
+            texture_index: 0, // Use fallback checkerboard texture
             metallic,
             roughness,
-            ao: 1.0,
-            clear_coat: 0.0,
-            clear_coat_roughness: 0.03,
-            sheen: 0.0,
-            use_albedo_map: 0.0,
-            use_normal_map: 0.0,
-            use_metallic_roughness_map: 0.0,
-            _padding1: [0.0; 3],
-            sheen_color: [1.0, 1.0, 1.0],
-            _padding2: 0.0,
-        };
+            _pad: 0.0,
+        });
 
-        // Create combined texture + shadow + env + BRDF + irradiance + detail bind group with default textures
-        let texture_bind_group = self.material
-            .create_texture_shadow_bind_group(
-                &self.device,
-                &self.white_texture,
-                &self.default_sampler,
-                &self.normal_texture,
-                &self.default_sampler,
-                &self.white_texture,
-                &self.default_sampler,
-                &self.shadow_uniform_buffer,
-                &self.shadow_map_view,
-                &self.shadow_sampler,
-                &self.shadow_cube_map_view,
-                &self.shadow_cube_sampler,
-                &self.prefiltered_env_view,  // Use prefiltered env map for IBL
-                &self.skybox_sampler,
-                self.brdf_lut.view(),
-                self.brdf_lut.sampler(),
-                &self.irradiance_view,
-                &self.skybox_sampler,
-                self.detail_normal_map.view(),
-                self.detail_normal_map.sampler(),
-                self.detail_albedo_map.view(),
-                self.detail_albedo_map.sampler(),
-            )
-            .ok_or_else(|| JsValue::from_str("Failed to create texture bind group"))?;
+        // Input vertices: 8 floats per vertex (pos3 + normal3 + uv2)
+        // Convert to Vertex format for Nanite
+        let vertex_count = vertices.len() / 8;
+        let mut nanite_vertices: Vec<Vertex> = Vec::with_capacity(vertex_count);
 
-        // Create transform matrix
-        let world_transform = Matrix4::from_translation(&Vector3::new(position[0], position[1], position[2]));
+        for i in 0..vertex_count {
+            let base = i * 8;
+            nanite_vertices.push(Vertex {
+                position: [
+                    vertices[base] + position[0],
+                    vertices[base + 1] + position[1],
+                    vertices[base + 2] + position[2],
+                ],
+                normal: [vertices[base + 3], vertices[base + 4], vertices[base + 5]],
+                uv: [vertices[base + 6], vertices[base + 7]],
+                barycentric: [0.0, 0.0, 0.0],
+            });
+        }
 
-        let mesh = Self::create_mesh_with_transform(
-            &self.device,
-            &self.material,
-            vertex_buffer,
-            index_buffer,
-            new_indices.len() as u32,
-            &world_transform,
-            mat_uniform,
-            texture_bind_group,
-        )?;
+        // Build clusters for Nanite with the correct material_id
+        let config = NaniteConfig::default();
+        let result = build_clusters(&nanite_vertices, indices, config.triangles_per_cluster, material_id);
 
-        self.meshes.push(mesh);
+        // Register with Nanite renderer
+        if let Some(ref mut nanite) = self.nanite_renderer {
+            let mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
+            // Set identity transform for this mesh
+            nanite.update_instances(&self.queue, &[(mesh_id, Matrix4::identity())]);
+
+            // Upload materials to the renderer
+            nanite.upload_materials_and_textures(&self.device, &self.queue, &self.primitive_materials, &[]);
+        }
+
         Ok(())
     }
 
@@ -4673,17 +4182,13 @@ impl RenApp {
 
         let mut ps = ParticleSystem::from_preset(preset_type);
 
-        // Get camera bind group layout from material
-        let camera_layout = self.material.camera_bind_group_layout()
-            .expect("Camera bind group layout not initialized");
-
         // Initialize the particle system
         // Use depth_copy_view (not depth_view) because we can't read and write same texture
         ps.init(
             &self.device,
             &self.queue,
             self.hdr_format,
-            camera_layout,
+            &self.camera_bind_group_layout,
             self.white_texture.view(),
             &self.depth_copy_view,
             &self.particle_sampler,
@@ -4906,64 +4411,59 @@ impl RenApp {
                 }],
             }));
 
+            // Create a default material for primitives
+            nanite.upload_materials_and_textures(
+                &self.device,
+                &self.queue,
+                &[NaniteMaterialGpu::default()],
+                &[],
+            );
+
             // Create combined texture+shadow bind group for Nanite material pass
             // Group 3 bindings: 0=materials, 1=texture_array, 2=texture_sampler, 3=shadow_data, 4=shadow_map, 5=shadow_sampler, 6=shadow_cube, 7=shadow_cube_sampler
-            if let Some(texture_view) = nanite.texture_array_view() {
-                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Nanite Textures+Shadows Bind Group"),
-                    layout: nanite.textures_layout(),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: nanite.material_buffer().as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(nanite.texture_sampler()),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: self.shadow_uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::TextureView(&self.shadow_map_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::TextureView(&self.shadow_cube_map_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::Sampler(&self.shadow_cube_sampler),
-                        },
-                    ],
-                });
-                nanite.set_texture_bind_group(texture_bind_group);
-            }
+            let texture_view = nanite.texture_array_view().expect("Fallback texture should exist");
+            let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Nanite Textures+Shadows Bind Group"),
+                layout: nanite.textures_layout(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: nanite.material_buffer().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(nanite.texture_sampler()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.shadow_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(&self.shadow_cube_map_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_cube_sampler),
+                    },
+                ],
+            });
+            nanite.set_texture_bind_group(texture_bind_group);
 
             self.nanite_renderer = Some(nanite);
         }
-    }
-
-    /// Enable or disable Nanite rendering.
-    #[wasm_bindgen]
-    pub fn set_nanite_enabled(&mut self, enabled: bool) {
-        self.nanite_enabled = enabled;
-    }
-
-    /// Check if Nanite is enabled.
-    #[wasm_bindgen]
-    pub fn nanite_enabled(&self) -> bool {
-        self.nanite_enabled
     }
 
     /// Load a mesh as Nanite geometry from vertex/index arrays.
@@ -5229,8 +4729,6 @@ impl RenApp {
         }
 
         // Extract materials and textures
-        use crate::nanite::NaniteMaterialGpu;
-
         // Build texture name -> index map
         let mut texture_name_to_index: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
         let mut texture_data: Vec<(u32, u32, Vec<u8>)> = Vec::new();
@@ -5344,62 +4842,6 @@ impl RenApp {
         Ok(loaded_count)
     }
 
-    // ========== Material Properties ==========
-
-    /// Set clear coat intensity for all meshes (0.0 = none, 1.0 = full glossy coat).
-    #[wasm_bindgen]
-    pub fn set_clear_coat(&mut self, value: f32) {
-        for mesh in &self.meshes {
-            // clear_coat is at byte offset 28 (after base_color[16] + metallic[4] + roughness[4] + ao[4])
-            self.queue.write_buffer(&mesh.material_buffer, 28, bytemuck::cast_slice(&[value]));
-        }
-    }
-
-    /// Set clear coat roughness for all meshes (typically very low, e.g., 0.03).
-    #[wasm_bindgen]
-    pub fn set_clear_coat_roughness(&mut self, value: f32) {
-        for mesh in &self.meshes {
-            // clear_coat_roughness is at byte offset 32
-            self.queue.write_buffer(&mesh.material_buffer, 32, bytemuck::cast_slice(&[value]));
-        }
-    }
-
-    /// Set sheen/cloth intensity for all meshes (0.0 = none, 1.0 = full cloth BRDF).
-    #[wasm_bindgen]
-    pub fn set_sheen(&mut self, value: f32) {
-        for mesh in &self.meshes {
-            // sheen is at byte offset 36
-            self.queue.write_buffer(&mesh.material_buffer, 36, bytemuck::cast_slice(&[value]));
-        }
-    }
-
-    /// Set sheen color for all meshes.
-    #[wasm_bindgen]
-    pub fn set_sheen_color(&mut self, r: f32, g: f32, b: f32) {
-        for mesh in &self.meshes {
-            // sheen_color is at byte offset 64 (after padding at 52-63)
-            self.queue.write_buffer(&mesh.material_buffer, 64, bytemuck::cast_slice(&[r, g, b]));
-        }
-    }
-
-    /// Set metallic factor for all meshes (0.0 = dielectric, 1.0 = metal).
-    #[wasm_bindgen]
-    pub fn set_material_metallic(&mut self, value: f32) {
-        for mesh in &self.meshes {
-            // metallic is at byte offset 16 (after base_color[16])
-            self.queue.write_buffer(&mesh.material_buffer, 16, bytemuck::cast_slice(&[value]));
-        }
-    }
-
-    /// Set roughness factor for all meshes (0.04 = mirror-like, 1.0 = completely rough).
-    #[wasm_bindgen]
-    pub fn set_material_roughness(&mut self, value: f32) {
-        for mesh in &self.meshes {
-            // roughness is at byte offset 20
-            self.queue.write_buffer(&mesh.material_buffer, 20, bytemuck::cast_slice(&[value]));
-        }
-    }
-
     // ========== Transform Gizmo ==========
 
     /// Enable or disable the transform gizmo.
@@ -5439,19 +4881,6 @@ impl RenApp {
             GizmoMode::Translate => 0,
             GizmoMode::Rotate => 1,
             GizmoMode::Scale => 2,
-        }
-    }
-
-    /// Attach gizmo to a mesh by index.
-    #[wasm_bindgen]
-    pub fn attach_gizmo_to_mesh(&mut self, mesh_index: usize) {
-        if mesh_index < self.meshes.len() {
-            self.gizmo_target_mesh = Some(mesh_index);
-            let pos = self.meshes[mesh_index].position;
-            self.gizmo.set_position(pos);
-            if self.gizmo_enabled {
-                self.update_gizmo_buffers();
-            }
         }
     }
 
@@ -5502,90 +4931,6 @@ impl RenApp {
         }
     }
 
-    /// Start a gizmo drag operation. Returns true if drag started successfully.
-    #[wasm_bindgen]
-    pub fn on_gizmo_drag_start(&mut self, screen_x: f32, screen_y: f32) -> bool {
-        if !self.gizmo_enabled {
-            return false;
-        }
-
-        let mesh_index = match self.gizmo_target_mesh {
-            Some(i) => i,
-            None => return false,
-        };
-
-        let ray = self.screen_to_ray(screen_x, screen_y);
-        let camera = self.camera.borrow();
-        self.gizmo.update_screen_scale(camera.position);
-        drop(camera);
-
-        let axis = match self.gizmo.hit_test(&ray) {
-            Some(a) => a,
-            None => return false,
-        };
-
-        if axis == GizmoAxis::None {
-            return false;
-        }
-
-        let mesh = &self.meshes[mesh_index];
-        let position = mesh.position;
-        let rotation = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
-        let scale = mesh.scale;
-
-        let started = self.gizmo.begin_drag(axis, &ray, position, rotation, scale);
-        if started {
-            self.update_gizmo_buffers();
-        }
-        started
-    }
-
-    /// Update a gizmo drag operation and apply transform to target mesh.
-    #[wasm_bindgen]
-    pub fn on_gizmo_drag(&mut self, screen_x: f32, screen_y: f32) {
-        if !self.gizmo.is_dragging() {
-            return;
-        }
-
-        let mesh_index = match self.gizmo_target_mesh {
-            Some(i) => i,
-            None => return,
-        };
-
-        let ray = self.screen_to_ray(screen_x, screen_y);
-        let result = self.gizmo.update_drag(&ray);
-
-        // Apply the transform result to the mesh
-        match result {
-            GizmoDragResult::Translate(delta) => {
-                let mesh = &mut self.meshes[mesh_index];
-                mesh.position = mesh.position + delta;
-                self.gizmo.set_position(mesh.position);
-                self.update_mesh_transform(mesh_index);
-            }
-            GizmoDragResult::Rotate(delta_quat) => {
-                let mesh = &mut self.meshes[mesh_index];
-                let current_quat = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
-                let new_quat = delta_quat.multiply(&current_quat);
-                let euler = Euler::from_quaternion(&new_quat, EulerOrder::XYZ);
-                mesh.rotation = Vector3::new(euler.x, euler.y, euler.z);
-                self.update_mesh_transform(mesh_index);
-            }
-            GizmoDragResult::Scale(delta_scale) => {
-                let mesh = &mut self.meshes[mesh_index];
-                mesh.scale = Vector3::new(
-                    mesh.scale.x * delta_scale.x,
-                    mesh.scale.y * delta_scale.y,
-                    mesh.scale.z * delta_scale.z,
-                );
-                self.update_mesh_transform(mesh_index);
-            }
-            GizmoDragResult::None => {}
-        }
-
-        self.update_gizmo_buffers();
-    }
-
     /// End a gizmo drag operation.
     #[wasm_bindgen]
     pub fn on_gizmo_drag_end(&mut self) {
@@ -5593,10 +4938,10 @@ impl RenApp {
         self.update_gizmo_buffers();
     }
 
-    /// Get number of meshes (for UI to show mesh selector).
+    /// Get number of Nanite meshes.
     #[wasm_bindgen]
     pub fn get_mesh_count(&self) -> usize {
-        self.meshes.len()
+        self.nanite_renderer.as_ref().map(|n| n.mesh_count()).unwrap_or(0)
     }
 
     /// Convert screen coordinates to a world-space ray.
@@ -5614,29 +4959,6 @@ impl RenApp {
             self.height as f32,
             &view_proj_inverse,
         )
-    }
-
-    /// Update mesh transform buffer after gizmo manipulation.
-    fn update_mesh_transform(&mut self, mesh_index: usize) {
-        if mesh_index >= self.meshes.len() {
-            return;
-        }
-
-        let mesh = &self.meshes[mesh_index];
-        let rotation_quat = Quaternion::from_euler(&Euler::xyz(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z));
-        let world_transform = Matrix4::compose(&mesh.position, &rotation_quat, &mesh.scale);
-        let normal_matrix = Matrix3::from_matrix4_normal(&world_transform);
-
-        let model_uniform = PbrModelUniform {
-            model: matrix4_to_array(&world_transform),
-            normal: matrix3_to_padded_array(&normal_matrix),
-        };
-
-        self.queue.write_buffer(
-            &mesh.model_buffer,
-            0,
-            bytemuck::cast_slice(&[model_uniform]),
-        );
     }
 
     /// Update gizmo line object buffers.
@@ -5727,11 +5049,3 @@ fn matrix4_to_array(m: &Matrix4) -> [[f32; 4]; 4] {
     ]
 }
 
-fn matrix3_to_padded_array(m: &Matrix3) -> [[f32; 4]; 3] {
-    let e = &m.elements;
-    [
-        [e[0], e[1], e[2], 0.0],
-        [e[3], e[4], e[5], 0.0],
-        [e[6], e[7], e[8], 0.0],
-    ]
-}
