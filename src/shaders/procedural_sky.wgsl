@@ -35,7 +35,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Full-screen triangle vertices
     let x = f32(i32(vertex_index & 1u) * 4 - 1);
     let y = f32(i32(vertex_index >> 1u) * 4 - 1);
-    out.position = vec4<f32>(x, y, 1.0, 1.0);
+    // Use depth slightly less than 1.0 to avoid z-fighting at far plane
+    // but still behind all scene geometry
+    out.position = vec4<f32>(x, y, 0.9999, 1.0);
     out.ndc = vec2<f32>(x, y);
 
     return out;

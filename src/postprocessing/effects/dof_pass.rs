@@ -38,6 +38,8 @@ pub struct DofSettings {
     pub focal_range: f32,
     /// Maximum blur strength (affects bokeh size).
     pub blur_strength: f32,
+    /// Aperture f-stop (lower = wider aperture = more blur, e.g., f/1.4 to f/22).
+    pub aperture: f32,
     /// Enable near blur (objects closer than focal plane).
     pub near_blur: bool,
     /// Enable far blur (objects further than focal plane).
@@ -54,6 +56,7 @@ impl Default for DofSettings {
             focal_distance: 5.0,
             focal_range: 2.0,
             blur_strength: 1.0,
+            aperture: 2.8, // f/2.8 - moderate depth of field
             near_blur: true,
             far_blur: true,
             highlight_boost: 0.5,
@@ -148,6 +151,17 @@ impl DofPass {
     /// Set blur strength.
     pub fn set_blur_strength(&mut self, strength: f32) {
         self.settings.blur_strength = strength.clamp(0.0, 5.0);
+    }
+
+    /// Set aperture f-stop (lower = wider aperture = more blur).
+    /// Common values: f/1.4 (very wide), f/2.8, f/5.6, f/11, f/22 (very narrow).
+    pub fn set_aperture(&mut self, f_stop: f32) {
+        self.settings.aperture = f_stop.clamp(0.5, 32.0);
+    }
+
+    /// Get current aperture f-stop.
+    pub fn aperture(&self) -> f32 {
+        self.settings.aperture
     }
 
     /// Set quality preset.
@@ -313,13 +327,17 @@ impl DofPass {
 
     fn create_uniform(&self) -> DofUniform {
         let aspect = self.width as f32 / self.height as f32;
-        let max_coc_pixels = self.settings.blur_strength * 40.0; // Max CoC in pixels
+        // Aperture affects blur: lower f-stop = wider aperture = more blur
+        // Using f/2.8 as reference point (aperture_factor = 1.0 at f/2.8)
+        let aperture_factor = 2.8 / self.settings.aperture.max(0.5);
+        let effective_blur = self.settings.blur_strength * aperture_factor;
+        let max_coc_pixels = effective_blur * 40.0; // Max CoC in pixels
 
         DofUniform {
             params: [
                 self.settings.focal_distance,
                 self.settings.focal_range,
-                self.settings.blur_strength,
+                effective_blur,
                 self.quality.ring_count() as f32,
             ],
             params2: [

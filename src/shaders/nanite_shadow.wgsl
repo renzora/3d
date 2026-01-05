@@ -72,20 +72,21 @@ fn vs_main(
 ) -> VertexOutput {
     var out: VertexOutput;
 
-    // Instanced rendering: each instance = one visible cluster
-    let visible_cluster_idx = instance_index;
+    // Instanced rendering: each instance = one cluster
+    // instance_index = cluster index
+    // vertex_index = which vertex within that cluster (0 to MAX_TRIANGLES_PER_CLUSTER * 3 - 1)
+    let cluster_id = instance_index;
     let triangle_in_cluster = vertex_index / 3u;
     let vertex_in_triangle = vertex_index % 3u;
 
-    // Check if this instance is valid
-    let visible_count = counter.visible_count;
-    if (visible_cluster_idx >= visible_count) {
+    // Check if this cluster is valid
+    let cluster_count = arrayLength(&clusters);
+    if (cluster_id >= cluster_count) {
         out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
         return out;
     }
 
-    let vis_cluster = visible_clusters[visible_cluster_idx];
-    let cluster = clusters[vis_cluster.cluster_id];
+    let cluster = clusters[cluster_id];
 
     // Check if this triangle exists in this cluster
     if (triangle_in_cluster >= cluster.triangle_count) {
@@ -101,12 +102,17 @@ fn vs_main(
     // Get vertex position
     let local_position = positions[cluster.vertex_offset + vertex_idx];
 
-    // Apply instance transform if available
+    // Find which instance owns this cluster
     var world_position = local_position;
-    if (vis_cluster.instance_id < arrayLength(&instances)) {
-        let instance = instances[vis_cluster.instance_id];
-        let transformed = instance.transform * vec4<f32>(local_position, 1.0);
-        world_position = transformed.xyz;
+    let instance_count = arrayLength(&instances);
+    for (var i = 0u; i < instance_count; i++) {
+        let inst = instances[i];
+        // Check if this cluster belongs to this instance
+        if (cluster_id >= inst.first_cluster && cluster_id < inst.first_cluster + inst.cluster_count) {
+            let transformed = inst.transform * vec4<f32>(local_position, 1.0);
+            world_position = transformed.xyz;
+            break;
+        }
     }
 
     // Transform to light's clip space

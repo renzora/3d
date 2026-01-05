@@ -140,6 +140,9 @@ pub struct RenApp {
     line_camera_bind_group: wgpu::BindGroup,
     // Controls
     controls: RefCell<OrbitControls>,
+    // Camera settings
+    camera_move_speed: RefCell<f32>,
+    camera_rotate_sensitivity: RefCell<f32>,
     // Line objects (grid, axes)
     line_objects: Vec<LineObject>,
     // Visibility flags for helpers
@@ -905,6 +908,8 @@ impl RenApp {
             camera_bind_group,
             line_camera_bind_group,
             controls: RefCell::new(controls),
+            camera_move_speed: RefCell::new(1.0),
+            camera_rotate_sensitivity: RefCell::new(1.0),
             line_objects,
             show_grid: true,
             show_axes: true,
@@ -1220,13 +1225,13 @@ impl RenApp {
                 ShadowLightType::Directional => {
                     // Directional light: orthographic projection
                     let light_dir = Vector3::new(self.light_direction[0], self.light_direction[1], self.light_direction[2]).normalized();
-                    let light_pos = Vector3::new(-light_dir.x * 15.0, -light_dir.y * 15.0, -light_dir.z * 15.0);
+                    let light_pos = Vector3::new(-light_dir.x * 80.0, -light_dir.y * 80.0, -light_dir.z * 80.0);
                     let light_target = Vector3::ZERO;
                     let light_up = if light_dir.y.abs() > 0.99 { Vector3::new(0.0, 0.0, 1.0) } else { Vector3::new(0.0, 1.0, 0.0) };
 
                     let light_view = Matrix4::look_at(&light_pos, &light_target, &light_up);
-                    let ortho_size = 20.0;
-                    let light_proj = Matrix4::orthographic(-ortho_size, ortho_size, -ortho_size, ortho_size, 0.1, 50.0);
+                    let ortho_size = 60.0;  // Larger to cover 100 unit floor
+                    let light_proj = Matrix4::orthographic(-ortho_size, ortho_size, -ortho_size, ortho_size, 0.1, 200.0);
                     let view_proj = light_proj.multiply(&light_view);
 
                     let uniform = WebShadowUniform {
@@ -1522,16 +1527,8 @@ impl RenApp {
                 occlusion_query_set: None,
             });
 
-            // Render sky first (at far depth, behind everything)
-            // Skip sky for flat mode (8) and wireframe mode (9)
-            if self.render_mode != 8 && self.render_mode != 9 {
-                // Procedural sky takes priority if enabled
-                if self.procedural_sky.enabled() {
-                    self.procedural_sky.render(&mut render_pass);
-                } else if self.skybox_enabled {
-                    self.skybox_pass.render(&mut render_pass, &self.skybox_bind_group);
-                }
-            }
+            // Sky is rendered AFTER Nanite geometry (see below)
+            // This ensures depth buffer has geometry before sky tests against it
 
             // Render line objects (grid at index 0, axes at index 1)
             if let Some(pipeline) = self.line_material.pipeline() {
@@ -1630,6 +1627,34 @@ impl RenApp {
                     nanite.render_material(&mut material_pass, camera_bg);
                 }
             }
+        }
+
+        // ========== Procedural Sky Pass (After Geometry) ==========
+        // Sky renders after all opaque geometry so it can depth-test properly
+        if self.procedural_sky.enabled() {
+            let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Procedural Sky Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing geometry
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Read existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.procedural_sky.render(&mut sky_pass);
         }
 
         // ========== Particle System Update (Compute Pass) ==========
@@ -2214,8 +2239,8 @@ impl RenApp {
         let mut controls = self.controls.borrow_mut();
         let mut camera = self.camera.borrow_mut();
 
-        // Sensitivity for freelook
-        let sensitivity = 0.003;
+        // Sensitivity for freelook (base * user setting)
+        let sensitivity = 0.003 * *self.camera_rotate_sensitivity.borrow();
 
         // Get current forward direction
         let diff = controls.target - camera.position;
@@ -2269,7 +2294,7 @@ impl RenApp {
         let yaw = forward_3d.z.atan2(forward_3d.x);
 
         // Yaw turning from horizontal mouse movement
-        let mouse_sensitivity = 0.005;
+        let mouse_sensitivity = 0.005 * *self.camera_rotate_sensitivity.borrow();
         let yaw_delta = delta_x * mouse_sensitivity;
         let new_yaw = yaw + yaw_delta;
 
@@ -2328,6 +2353,89 @@ impl RenApp {
 
         // Reset controls to match camera
         controls.reset_to_camera(&camera);
+    }
+
+    // ==================== Camera Settings API ====================
+
+    /// Get camera field of view in degrees.
+    #[wasm_bindgen]
+    pub fn get_camera_fov(&self) -> f32 {
+        self.camera.borrow().fov
+    }
+
+    /// Set camera field of view in degrees.
+    #[wasm_bindgen]
+    pub fn set_camera_fov(&self, fov: f32) {
+        let mut camera = self.camera.borrow_mut();
+        camera.set_fov(fov.clamp(10.0, 120.0));
+    }
+
+    /// Get camera near clipping plane.
+    #[wasm_bindgen]
+    pub fn get_camera_near(&self) -> f32 {
+        self.camera.borrow().near
+    }
+
+    /// Set camera near clipping plane.
+    #[wasm_bindgen]
+    pub fn set_camera_near(&self, near: f32) {
+        let mut camera = self.camera.borrow_mut();
+        let far = camera.far;
+        camera.set_clip_planes(near.max(0.001), far);
+    }
+
+    /// Get camera far clipping plane.
+    #[wasm_bindgen]
+    pub fn get_camera_far(&self) -> f32 {
+        self.camera.borrow().far
+    }
+
+    /// Set camera far clipping plane.
+    #[wasm_bindgen]
+    pub fn set_camera_far(&self, far: f32) {
+        let mut camera = self.camera.borrow_mut();
+        let near = camera.near;
+        camera.set_clip_planes(near, far.max(near + 1.0));
+    }
+
+    /// Get camera move speed multiplier.
+    #[wasm_bindgen]
+    pub fn get_camera_move_speed(&self) -> f32 {
+        *self.camera_move_speed.borrow()
+    }
+
+    /// Set camera move speed multiplier (affects WASD movement).
+    #[wasm_bindgen]
+    pub fn set_camera_move_speed(&self, speed: f32) {
+        *self.camera_move_speed.borrow_mut() = speed.clamp(0.1, 10.0);
+        // Also update the controls pan_speed which affects translate
+        self.controls.borrow_mut().pan_speed = speed.clamp(0.1, 10.0);
+    }
+
+    /// Get camera rotation sensitivity multiplier.
+    #[wasm_bindgen]
+    pub fn get_camera_rotate_sensitivity(&self) -> f32 {
+        *self.camera_rotate_sensitivity.borrow()
+    }
+
+    /// Set camera rotation sensitivity (affects freelook and orbit).
+    #[wasm_bindgen]
+    pub fn set_camera_rotate_sensitivity(&self, sensitivity: f32) {
+        *self.camera_rotate_sensitivity.borrow_mut() = sensitivity.clamp(0.1, 5.0);
+        // Also update orbit controls rotate_speed
+        self.controls.borrow_mut().rotate_speed = sensitivity.clamp(0.1, 5.0);
+    }
+
+    /// Get camera zoom speed multiplier.
+    #[wasm_bindgen]
+    pub fn get_camera_zoom_speed(&self) -> f32 {
+        self.controls.borrow().zoom_speed
+    }
+
+    /// Set camera zoom speed multiplier.
+    #[wasm_bindgen]
+    pub fn set_camera_zoom_speed(&self, speed: f32) {
+        self.controls.borrow_mut().zoom_speed = speed.clamp(0.1, 5.0);
     }
 
     /// Load a GLTF/GLB model from bytes (uses Nanite pipeline).
@@ -3035,6 +3143,20 @@ impl RenApp {
     #[wasm_bindgen]
     pub fn set_dof_blur_strength(&mut self, strength: f32) {
         self.dof.set_blur_strength(strength);
+    }
+
+    /// Set DoF aperture f-stop (0.5 - 32.0).
+    /// Lower values = wider aperture = shallower depth of field (more blur).
+    /// Common values: f/1.4 (very shallow), f/2.8, f/5.6, f/11, f/22 (very deep).
+    #[wasm_bindgen]
+    pub fn set_dof_aperture(&mut self, f_stop: f32) {
+        self.dof.set_aperture(f_stop);
+    }
+
+    /// Get current DoF aperture f-stop.
+    #[wasm_bindgen]
+    pub fn get_dof_aperture(&self) -> f32 {
+        self.dof.aperture()
     }
 
     /// Set DoF quality (0=Low, 1=Medium, 2=High, 3=Ultra).
@@ -4104,6 +4226,246 @@ impl RenApp {
         self.add_geometry(&vertices, &indices, [0.0, y, 0.0], [r, g, b, 1.0], metallic, roughness)
     }
 
+    /// Add a grid of terrain tiles with mountains on the outer edges.
+    #[wasm_bindgen]
+    pub fn add_terrain_grid(
+        &mut self,
+        grid_size: u32,      // Number of tiles in each direction (e.g., 5 = 5x5 grid)
+        tile_size: f32,      // Size of each tile
+        y: f32,              // Base Y position
+        mountain_height: f32, // Maximum height of mountains
+        resolution: u32,     // Vertices per tile edge (higher = more detailed)
+    ) -> Result<(), JsValue> {
+        let half_grid = grid_size as f32 / 2.0;
+        let total_size = grid_size as f32 * tile_size;
+
+        // All tiles use the same unified terrain function for seamless edges
+        for grid_z in 0..grid_size {
+            for grid_x in 0..grid_size {
+                // Calculate tile center position
+                let center_x = (grid_x as f32 - half_grid + 0.5) * tile_size;
+                let center_z = (grid_z as f32 - half_grid + 0.5) * tile_size;
+
+                // All tiles use unified terrain with same height function
+                self.add_terrain_tile(
+                    center_x, y, center_z,
+                    tile_size,
+                    mountain_height,
+                    resolution,
+                    total_size,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a unified terrain tile that samples a global height function.
+    /// All tiles use the same function, ensuring seamless edges.
+    fn add_terrain_tile(
+        &mut self,
+        center_x: f32,
+        y: f32,
+        center_z: f32,
+        size: f32,
+        max_height: f32,
+        resolution: u32,
+        total_terrain_size: f32,
+    ) -> Result<(), JsValue> {
+        let res = resolution.max(2);
+        let s = size / 2.0;
+        let step = size / (res - 1) as f32;
+
+        // Smooth interpolation function
+        fn smoothstep(t: f32) -> f32 {
+            t * t * (3.0 - 2.0 * t)
+        }
+
+        // Quintic interpolation for even smoother results (like Perlin noise)
+        fn quintic(t: f32) -> f32 {
+            t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+        }
+
+        // Hash function for gradient noise (returns 0-1)
+        fn hash(x: i32, z: i32, seed: i32) -> f32 {
+            let n = (x.wrapping_mul(374761393))
+                .wrapping_add(z.wrapping_mul(668265263))
+                .wrapping_add(seed.wrapping_mul(1013904223));
+            let n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+            let n = n ^ (n >> 16);
+            // Convert to 0-1 range properly
+            ((n as u32) as f32) / (u32::MAX as f32)
+        }
+
+        // Smooth value noise with bicubic interpolation
+        fn value_noise(x: f32, z: f32, seed: i32) -> f32 {
+            let xi = x.floor() as i32;
+            let zi = z.floor() as i32;
+            let xf = x - x.floor();
+            let zf = z - z.floor();
+
+            // Smooth interpolation weights
+            let u = quintic(xf);
+            let v = quintic(zf);
+
+            // Sample 4 corners
+            let n00 = hash(xi, zi, seed);
+            let n10 = hash(xi + 1, zi, seed);
+            let n01 = hash(xi, zi + 1, seed);
+            let n11 = hash(xi + 1, zi + 1, seed);
+
+            // Bilinear interpolation
+            let nx0 = n00 + (n10 - n00) * u;
+            let nx1 = n01 + (n11 - n01) * u;
+            nx0 + (nx1 - nx0) * v
+        }
+
+        // Fractal Brownian Motion with smooth value noise
+        fn fbm_smooth(x: f32, z: f32, seed: i32, octaves: u32) -> f32 {
+            let mut value = 0.0;
+            let mut amplitude = 1.0;
+            let mut frequency = 1.0;
+            let mut max_value = 0.0;
+
+            for i in 0..octaves {
+                value += amplitude * value_noise(x * frequency, z * frequency, seed + i as i32 * 1000);
+                max_value += amplitude;
+                amplitude *= 0.5;  // Persistence
+                frequency *= 2.0;  // Lacunarity
+            }
+
+            value / max_value
+        }
+
+        // Global height function - same for all tiles, ensuring seamless edges
+        let get_terrain_height = |world_x: f32, world_z: f32| -> f32 {
+            // Use a fixed global seed so all tiles use the same noise
+            let global_seed = 42;
+
+            // Generate smooth height using fractal noise
+            let noise_scale = 0.008;
+            let height_raw = fbm_smooth(
+                world_x * noise_scale,
+                world_z * noise_scale,
+                global_seed,
+                3 // fewer octaves = smoother
+            );
+
+            // Remap noise to create more natural terrain shape
+            let height_shaped = height_raw * height_raw * (3.0 - 2.0 * height_raw); // S-curve
+
+            // Calculate distance from world center for edge blending
+            // Mountains should rise from center toward outer edges
+            let world_dist_x = world_x.abs();
+            let world_dist_z = world_z.abs();
+            let world_dist = world_dist_x.max(world_dist_z);
+
+            // Inner flat area radius - center stays flat
+            let inner_radius = total_terrain_size * 0.25;  // Inner 25% stays flat
+            let outer_radius = total_terrain_size * 0.45;  // Full height at 45% from center
+
+            // Smooth transition from flat to mountains
+            let blend_range = outer_radius - inner_radius;
+            let mountain_blend = ((world_dist - inner_radius) / blend_range).clamp(0.0, 1.0);
+            let mountain_blend = smoothstep(mountain_blend);
+
+            // Apply height - flat in center, rising toward edges
+            height_shaped * max_height * mountain_blend
+        };
+
+        let mut vertices: Vec<f32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        // Generate vertices
+        for iz in 0..res {
+            for ix in 0..res {
+                let local_x = -s + ix as f32 * step;
+                let local_z = -s + iz as f32 * step;
+
+                // World position for noise sampling
+                let world_x = center_x + local_x;
+                let world_z = center_z + local_z;
+
+                // Sample the global height function
+                let height = get_terrain_height(world_x, world_z);
+
+                // Calculate UV
+                let u = ix as f32 / (res - 1) as f32;
+                let v = iz as f32 / (res - 1) as f32;
+
+                // Position
+                vertices.push(local_x);
+                vertices.push(height);
+                vertices.push(local_z);
+
+                // Normal (will calculate properly after)
+                vertices.push(0.0);
+                vertices.push(1.0);
+                vertices.push(0.0);
+
+                // UV
+                vertices.push(u * size / 4.0);
+                vertices.push(v * size / 4.0);
+            }
+        }
+
+        // Calculate proper normals using central differences
+        for iz in 0..res {
+            for ix in 0..res {
+                let idx = (iz * res + ix) as usize;
+
+                // Get heights of neighboring vertices
+                let get_height = |x: i32, z: i32| -> f32 {
+                    let cx = (x as u32).clamp(0, res - 1);
+                    let cz = (z as u32).clamp(0, res - 1);
+                    let i = (cz * res + cx) as usize;
+                    vertices[i * 8 + 1] // Y component
+                };
+
+                let hL = get_height(ix as i32 - 1, iz as i32);
+                let hR = get_height(ix as i32 + 1, iz as i32);
+                let hD = get_height(ix as i32, iz as i32 - 1);
+                let hU = get_height(ix as i32, iz as i32 + 1);
+
+                // Calculate normal from height differences
+                let nx = hL - hR;
+                let nz = hD - hU;
+                let ny = 2.0 * step;
+
+                // Normalize
+                let len = (nx * nx + ny * ny + nz * nz).sqrt();
+                vertices[idx * 8 + 3] = nx / len;
+                vertices[idx * 8 + 4] = ny / len;
+                vertices[idx * 8 + 5] = nz / len;
+            }
+        }
+
+        // Generate indices
+        for iz in 0..(res - 1) {
+            for ix in 0..(res - 1) {
+                let curr = iz * res + ix;
+                let next = curr + res;
+
+                // Two triangles per quad
+                indices.push(curr);
+                indices.push(next);
+                indices.push(next + 1);
+
+                indices.push(curr);
+                indices.push(next + 1);
+                indices.push(curr + 1);
+            }
+        }
+
+        // Unified terrain color - grey/brown blend
+        self.add_geometry(
+            &vertices, &indices,
+            [center_x, y, center_z],
+            [0.42, 0.38, 0.32, 1.0], // Neutral ground color
+            0.0, 0.85
+        )
+    }
+
     /// Internal helper to add geometry with material (uses Nanite pipeline).
     fn add_geometry(
         &mut self,
@@ -4151,12 +4513,59 @@ impl RenApp {
 
         // Register with Nanite renderer
         if let Some(ref mut nanite) = self.nanite_renderer {
-            let mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
-            // Set identity transform for this mesh
-            nanite.update_instances(&self.queue, &[(mesh_id, Matrix4::identity())]);
+            let _mesh_id = nanite.register_mesh(&self.device, &self.queue, result);
+            // Update instances for ALL meshes (not just the new one)
+            // This is required because update_instances replaces the entire instance buffer
+            let instances: Vec<(usize, Matrix4)> = (0..nanite.mesh_count())
+                .map(|i| (i, Matrix4::identity()))
+                .collect();
+            nanite.update_instances(&self.queue, &instances);
 
             // Upload materials to the renderer
             nanite.upload_materials_and_textures(&self.device, &self.queue, &self.primitive_materials, &[]);
+
+            // Recreate texture bind group with shadow resources (required after upload_materials_and_textures)
+            if let Some(texture_view) = nanite.texture_array_view() {
+                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Nanite Textures+Shadows Bind Group"),
+                    layout: nanite.textures_layout(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: nanite.material_buffer().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(nanite.texture_sampler()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.shadow_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&self.shadow_cube_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_cube_sampler),
+                        },
+                    ],
+                });
+                nanite.set_texture_bind_group(texture_bind_group);
+            }
         }
 
         Ok(())
@@ -4702,12 +5111,13 @@ impl RenApp {
                     });
                 }
 
-                // Build clusters
+                // Build clusters - offset material index by number of primitive materials
+                let material_offset = self.primitive_materials.len() as u32;
                 let result = build_clusters(
                     &vertices,
                     &geometry.indices,
                     config.triangles_per_cluster,
-                    loaded_mesh.material_index.unwrap_or(0) as u32,
+                    material_offset + loaded_mesh.material_index.unwrap_or(0) as u32,
                 );
 
                 // Register with Nanite renderer
@@ -4733,14 +5143,55 @@ impl RenApp {
         let mut texture_name_to_index: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
         let mut texture_data: Vec<(u32, u32, Vec<u8>)> = Vec::new();
 
+        // Maximum texture size to avoid memory issues (2048x2048 = 16MB per texture)
+        const MAX_TEXTURE_SIZE: u32 = 2048;
+
         for (name, tex) in &scene.textures {
             let idx = texture_data.len() as i32;
             texture_name_to_index.insert(name.clone(), idx);
-            web_sys::console::log_1(&format!(
-                "  Texture {}: {} = {}x{} ({} bytes)",
-                idx, name, tex.width, tex.height, tex.data.len()
-            ).into());
-            texture_data.push((tex.width, tex.height, tex.data.clone()));
+
+            // Downsample large textures immediately to avoid memory issues
+            let (final_width, final_height, final_data) = if tex.width > MAX_TEXTURE_SIZE || tex.height > MAX_TEXTURE_SIZE {
+                let scale = MAX_TEXTURE_SIZE as f32 / tex.width.max(tex.height) as f32;
+                let new_width = ((tex.width as f32 * scale) as u32).max(1);
+                let new_height = ((tex.height as f32 * scale) as u32).max(1);
+
+                // Simple box downsampling
+                let mut downsampled = vec![0u8; (new_width * new_height * 4) as usize];
+                let x_ratio = tex.width as f32 / new_width as f32;
+                let y_ratio = tex.height as f32 / new_height as f32;
+
+                for y in 0..new_height {
+                    for x in 0..new_width {
+                        let src_x = ((x as f32 * x_ratio) as u32).min(tex.width - 1);
+                        let src_y = ((y as f32 * y_ratio) as u32).min(tex.height - 1);
+                        let src_idx = ((src_y * tex.width + src_x) * 4) as usize;
+                        let dst_idx = ((y * new_width + x) * 4) as usize;
+
+                        if src_idx + 3 < tex.data.len() && dst_idx + 3 < downsampled.len() {
+                            downsampled[dst_idx] = tex.data[src_idx];
+                            downsampled[dst_idx + 1] = tex.data[src_idx + 1];
+                            downsampled[dst_idx + 2] = tex.data[src_idx + 2];
+                            downsampled[dst_idx + 3] = tex.data[src_idx + 3];
+                        }
+                    }
+                }
+
+                web_sys::console::log_1(&format!(
+                    "  Texture {}: {} = {}x{} -> {}x{} (downsampled from {} bytes)",
+                    idx, name, tex.width, tex.height, new_width, new_height, tex.data.len()
+                ).into());
+
+                (new_width, new_height, downsampled)
+            } else {
+                web_sys::console::log_1(&format!(
+                    "  Texture {}: {} = {}x{} ({} bytes)",
+                    idx, name, tex.width, tex.height, tex.data.len()
+                ).into());
+                (tex.width, tex.height, tex.data.clone())
+            };
+
+            texture_data.push((final_width, final_height, final_data));
         }
 
         web_sys::console::log_1(&format!(
@@ -4749,12 +5200,16 @@ impl RenApp {
             scene.materials.len()
         ).into());
 
-        // Build materials array
-        let mut gpu_materials: Vec<NaniteMaterialGpu> = Vec::new();
+        // Build materials array - start with primitive materials to preserve demo shapes
+        let mut gpu_materials: Vec<NaniteMaterialGpu> = self.primitive_materials.clone();
+        let material_offset = gpu_materials.len() as u32;
+
         for (i, mat) in scene.materials.iter().enumerate() {
+            // Offset texture index by 1 since index 0 is the fallback checkerboard
             let texture_index = mat.base_color_texture
                 .as_ref()
                 .and_then(|name| texture_name_to_index.get(name).copied())
+                .map(|idx| idx + 1)  // Offset by 1 for fallback texture
                 .unwrap_or(-1);
 
             web_sys::console::log_1(&format!(
@@ -4776,10 +5231,17 @@ impl RenApp {
             });
         }
 
-        // Add default material if none
-        if gpu_materials.is_empty() {
+        // Add default material if no GLTF materials (but we always have primitive materials)
+        if scene.materials.is_empty() {
             gpu_materials.push(NaniteMaterialGpu::default());
         }
+
+        web_sys::console::log_1(&format!(
+            "Nanite: {} primitive materials preserved, {} GLTF materials added (offset={})",
+            self.primitive_materials.len(),
+            scene.materials.len(),
+            material_offset
+        ).into());
 
         // Upload materials and textures
         if let Some(ref mut nanite) = self.nanite_renderer {

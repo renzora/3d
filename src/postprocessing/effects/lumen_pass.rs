@@ -30,20 +30,30 @@ impl LumenQuality {
     /// Get the number of rays for this quality level.
     pub fn ray_count(&self) -> u32 {
         match self {
-            Self::Low => 4,
-            Self::Medium => 8,
-            Self::High => 12,
-            Self::Ultra => 16,
+            Self::Low => 2,      // Reduced from 4
+            Self::Medium => 4,   // Reduced from 8
+            Self::High => 6,     // Reduced from 12
+            Self::Ultra => 8,    // Reduced from 16
         }
     }
 
     /// Get the number of steps per ray for this quality level.
     pub fn step_count(&self) -> u32 {
         match self {
-            Self::Low => 8,
-            Self::Medium => 12,
-            Self::High => 16,
-            Self::Ultra => 24,
+            Self::Low => 6,      // Reduced from 8
+            Self::Medium => 8,   // Reduced from 12
+            Self::High => 12,    // Reduced from 16
+            Self::Ultra => 16,   // Reduced from 24
+        }
+    }
+
+    /// Get resolution scale (1.0 = full, 0.5 = half)
+    pub fn resolution_scale(&self) -> f32 {
+        match self {
+            Self::Low => 0.5,    // Half resolution
+            Self::Medium => 0.5, // Half resolution
+            Self::High => 0.75,  // 3/4 resolution
+            Self::Ultra => 1.0,  // Full resolution
         }
     }
 }
@@ -1401,6 +1411,7 @@ struct ProbeGridInfo {
 @group(1) @binding(1) var<uniform> probe_grid: ProbeGridInfo;
 
 const PI: f32 = 3.14159265359;
+const MAX_RAY_INTENSITY: f32 = 20.0;  // Firefly clamp
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -1408,6 +1419,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.position = vec4<f32>(in.position, 0.0, 1.0);
     out.uv = in.uv;
     return out;
+}
+
+// Screen-edge vignette to fade out samples near borders (Unreal's technique)
+fn compute_hit_vignette(screen_pos: vec2<f32>) -> f32 {
+    let centered = screen_pos * 2.0 - 1.0;  // -1 to 1
+    let vignette = saturate(abs(centered) * 5.0 - 4.0);
+    return saturate(1.0 - dot(vignette, vignette));
+}
+
+// Clamp max intensity to prevent fireflies (Unreal's technique)
+fn clamp_ray_intensity(radiance: vec3<f32>) -> vec3<f32> {
+    let max_lighting = max(max(radiance.x, radiance.y), radiance.z);
+    if (max_lighting > MAX_RAY_INTENSITY) {
+        return radiance * (MAX_RAY_INTENSITY / max_lighting);
+    }
+    return radiance;
 }
 
 // Better hash function for less structured noise
@@ -1585,13 +1612,16 @@ fn sample_probe_irradiance(world_pos: vec3<f32>, world_dir: vec3<f32>) -> vec3<f
 // Ray tracing with probe fallback
 // ============================================================================
 
-// Trace a single GI ray, falling back to probe sampling when ray misses
+// Trace a single GI ray with Unreal-style handling
 fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32, world_origin: vec3<f32>) -> vec4<f32> {
     let max_distance = params.params.x;
     let thickness = params.params.y;
 
     let step_size = max_distance / f32(step_count);
     var ray_pos = origin;
+    var last_valid_uv = vec2<f32>(0.5, 0.5);
+    var last_valid_color = vec3<f32>(0.0);
+    var found_any_valid = false;
 
     for (var i = 0; i < step_count; i++) {
         ray_pos += direction * step_size;
@@ -1600,58 +1630,66 @@ fn trace_gi_ray(origin: vec3<f32>, direction: vec3<f32>, step_count: i32, world_
         let screen = project_to_screen(ray_pos);
         let uv = screen.xy;
 
-        // Check bounds - when ray goes off-screen, sample probes
+        // Check if behind camera - skip but continue tracing
+        if (screen.z < 0.0) {
+            continue;
+        }
+
+        // Check bounds
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-            // Calculate world-space position and direction for probe sampling
-            let world_ray_pos = view_to_world(ray_pos);
-            let world_dir = view_dir_to_world(direction);
+            // Off-screen: use last valid sample if we have one
+            if (found_any_valid) {
+                let vignette = compute_hit_vignette(last_valid_uv);
+                return vec4<f32>(clamp_ray_intensity(last_valid_color) * vignette, 1.0);
+            }
+            continue;
+        }
 
-            // Sample irradiance from probe grid
-            let probe_irr = sample_probe_irradiance(world_ray_pos, world_dir);
-            let probe_intensity = 0.25; // Blend factor for probe contribution
-
-            return vec4<f32>(probe_irr * probe_intensity, 1.0);
+        // Compute vignette for this position
+        let vignette = compute_hit_vignette(uv);
+        if (vignette < 0.01) {
+            continue;  // Too close to edge, skip
         }
 
         // Sample depth
         let sampled_depth = textureSampleLevel(depth_texture, point_sampler, uv, 0);
 
-        // Sky hit - sample sky color for ambient contribution
+        // Sky hit - valid sample
         if (sampled_depth >= 0.9999) {
             let sky_color = textureSampleLevel(scene_texture, linear_sampler, uv, 0.0).rgb;
-            let sky_intensity = 0.3;
-            let t = f32(i) / f32(step_count);
-            let distance_fade = 1.0 - t;
-            return vec4<f32>(sky_color * sky_intensity * distance_fade, 1.0);
+            return vec4<f32>(clamp_ray_intensity(sky_color * 0.3) * vignette, 1.0);
         }
 
+        // Track this as a valid sample position
+        let scene_color = textureSampleLevel(scene_texture, linear_sampler, uv, 0.0).rgb;
+        last_valid_uv = uv;
+        last_valid_color = scene_color;
+        found_any_valid = true;
+
         let sampled_pos = get_view_pos(uv, sampled_depth);
+        let depth_diff = ray_pos.z - sampled_pos.z;
 
         // Check for hit
-        let depth_diff = ray_pos.z - sampled_pos.z;
         if (depth_diff > 0.0 && depth_diff < thickness) {
-            // Hit! Sample scene color
-            let hit_color = textureSampleLevel(scene_texture, linear_sampler, uv, 0.0).rgb;
-
-            // Distance fade
+            // Hit! Sample scene color with vignette and distance fade
             let t = f32(i) / f32(step_count);
             let distance_fade = 1.0 - t * t;
 
-            // Edge fade (avoid sampling at screen edges)
-            let edge_fade = smoothstep(0.0, 0.1, uv.x) * smoothstep(1.0, 0.9, uv.x) *
-                           smoothstep(0.0, 0.1, uv.y) * smoothstep(1.0, 0.9, uv.y);
-
-            return vec4<f32>(hit_color * distance_fade * edge_fade, 1.0);
+            return vec4<f32>(clamp_ray_intensity(scene_color) * distance_fade * vignette, 1.0);
         }
     }
 
-    // No hit found after all steps - sample probes at final ray position
-    let world_ray_pos = view_to_world(ray_pos);
-    let world_dir = view_dir_to_world(direction);
-    let probe_irr = sample_probe_irradiance(world_ray_pos, world_dir);
-    let probe_intensity = 0.2; // Slightly lower for max-distance fallback
+    // No hit found - use last valid sample if available, else return scene color at origin
+    if (found_any_valid) {
+        let vignette = compute_hit_vignette(last_valid_uv);
+        return vec4<f32>(clamp_ray_intensity(last_valid_color * 0.2) * vignette, 1.0);
+    }
 
-    return vec4<f32>(probe_irr * probe_intensity, 1.0);
+    // Absolute fallback: sample scene at current pixel for ambient
+    let origin_screen = project_to_screen(origin);
+    let origin_uv = clamp(origin_screen.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+    let ambient = textureSampleLevel(scene_texture, linear_sampler, origin_uv, 0.0).rgb;
+    return vec4<f32>(clamp_ray_intensity(ambient * 0.1), 1.0);
 }
 
 @fragment
@@ -1662,9 +1700,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let depth = textureSampleLevel(depth_texture, point_sampler, in.uv, 0);
 
-    // Skip sky
+    // Skip sky - return scene color for sky pixels
     if (depth >= 0.9999) {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        let sky = textureSampleLevel(scene_texture, linear_sampler, in.uv, 0.0).rgb;
+        return vec4<f32>(sky * 0.1, 1.0);
     }
 
     let view_pos = get_view_pos(in.uv, depth);
@@ -1685,20 +1724,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let view_dir = tbn * local_dir;
 
         // Weight by cos(theta) - already built into cosine sampling
-        let weight = local_dir.z;
+        let weight = max(local_dir.z, 0.01);  // Ensure minimum weight
 
-        // Trace ray with probe fallback
+        // Trace ray
         let hit = trace_gi_ray(view_pos + normal * 0.01, view_dir, step_count, world_origin);
 
-        if (hit.w > 0.0) {
-            accumulated_gi += hit.rgb * weight;
-            total_weight += weight;
-        }
+        // All rays now return valid colors (no w=0 returns)
+        accumulated_gi += hit.rgb * weight;
+        total_weight += weight;
     }
 
-    if (total_weight > 0.0) {
-        accumulated_gi /= total_weight;
-    }
+    // Normalize and ensure we always have some value
+    accumulated_gi /= max(total_weight, 0.001);
+
+    // Final clamp to ensure no extreme values
+    accumulated_gi = clamp_ray_intensity(accumulated_gi);
 
     return vec4<f32>(accumulated_gi, 1.0);
 }
@@ -1776,14 +1816,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let center_linear_depth = linearize_depth(center_depth);
     let center_normal = get_normal(in.uv);
 
-    // Edge-aware bilateral blur (larger kernel for aggressive denoising)
+    // Edge-aware bilateral blur (optimized smaller kernel - 5x5 instead of 11x11)
     var total_gi = vec3<f32>(0.0);
     var total_weight = 0.0;
 
-    let blur_radius = 5;
-    let sigma_spatial = 4.0;
-    let sigma_depth = 0.15;
-    let sigma_normal = 0.7;
+    let blur_radius = 2;  // Reduced from 5 (5x5 kernel = 25 samples vs 121)
+    let sigma_spatial = 2.0;
+    let sigma_depth = 0.1;
+    let sigma_normal = 0.5;
 
     for (var y = -blur_radius; y <= blur_radius; y++) {
         for (var x = -blur_radius; x <= blur_radius; x++) {
@@ -1941,13 +1981,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let history_valid = select(0.7, 1.0, prev_depth > 0.0001);
     let effective_blend = temporal_blend * history_valid;
 
-    // Neighborhood clamping with larger kernel (5x5)
+    // Neighborhood clamping with optimized 3x3 kernel (9 samples vs 25)
     let texel = params.resolution.xy;
     var gi_min = current.rgb;
     var gi_max = current.rgb;
 
-    for (var y = -2; y <= 2; y++) {
-        for (var x = -2; x <= 2; x++) {
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) { continue; }
             let offset = vec2<f32>(f32(x), f32(y)) * texel;
             let neighbor = textureSampleLevel(current_gi, linear_sampler, in.uv + offset, 0.0).rgb;

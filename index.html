@@ -133,6 +133,13 @@
 
                 // Default settings
                 const defaultSettings = {
+                    // Camera
+                    cameraFov: 60,
+                    cameraNear: 0.1,
+                    cameraFar: 1000,
+                    cameraMoveSpeed: 1.0,
+                    cameraRotateSensitivity: 1.0,
+                    cameraZoomSpeed: 1.0,
                     // Render
                     renderMode: 0,
                     // Day/Night
@@ -212,6 +219,7 @@
                     dofQuality: 1,
                     dofFocalDistance: 5.0,
                     dofFocalRange: 2.0,
+                    dofAperture: 2.8,
                     dofBlurStrength: 1.0,
                     dofHighlightBoost: 0.5,
                     dofHighlightThreshold: 0.5,
@@ -386,6 +394,15 @@
                 const renderModes = { Lit: 0, Unlit: 1, Normals: 2, Depth: 3, Metallic: 4, Roughness: 5, AO: 6, UVs: 7, Flat: 8, Wireframe: 9 };
                 renderFolder.add(settings, 'renderMode', renderModes).name('Mode').onChange(v => app.set_render_mode(v));
 
+                // Camera
+                const cameraFolder = gui.addFolder('Camera');
+                cameraFolder.add(settings, 'cameraFov', 10, 120).name('Field of View').onChange(v => app.set_camera_fov(v));
+                cameraFolder.add(settings, 'cameraNear', 0.01, 10).name('Near Plane').onChange(v => app.set_camera_near(v));
+                cameraFolder.add(settings, 'cameraFar', 100, 10000).name('Far Plane').onChange(v => app.set_camera_far(v));
+                cameraFolder.add(settings, 'cameraMoveSpeed', 0.1, 10).name('Move Speed').onChange(v => app.set_camera_move_speed(v));
+                cameraFolder.add(settings, 'cameraRotateSensitivity', 0.1, 5).name('Rotate Sensitivity').onChange(v => app.set_camera_rotate_sensitivity(v));
+                cameraFolder.add(settings, 'cameraZoomSpeed', 0.1, 5).name('Zoom Speed').onChange(v => app.set_camera_zoom_speed(v));
+
                 // Day/Night
                 const dayNightFolder = gui.addFolder('Day/Night Cycle');
                 dayNightFolder.add(settings, 'dayNightEnabled').name('Auto Cycle');
@@ -499,6 +516,7 @@
                 dofFolder.add(settings, 'dofQuality', { Low: 0, Medium: 1, High: 2, Ultra: 3 }).name('Quality').onChange(v => app.set_dof_quality(parseInt(v)));
                 dofFolder.add(settings, 'dofFocalDistance', 1, 20).name('Focal Distance').onChange(v => app.set_dof_focal_distance(v));
                 dofFolder.add(settings, 'dofFocalRange', 0.5, 10).name('Focal Range').onChange(v => app.set_dof_focal_range(v));
+                dofFolder.add(settings, 'dofAperture', 0.5, 22).name('Aperture (f-stop)').onChange(v => app.set_dof_aperture(v));
                 dofFolder.add(settings, 'dofBlurStrength', 0, 3).name('Blur Strength').onChange(v => app.set_dof_blur_strength(v));
                 dofFolder.add(settings, 'dofHighlightBoost', 0, 2).name('Highlight Boost').onChange(v => { if (app.set_dof_highlight_boost) app.set_dof_highlight_boost(v); });
                 dofFolder.add(settings, 'dofHighlightThreshold', 0, 1).name('Highlight Threshold').onChange(v => { if (app.set_dof_highlight_threshold) app.set_dof_highlight_threshold(v); });
@@ -627,6 +645,7 @@
 
                 // Close all folders by default
                 renderFolder.close();
+                cameraFolder.close();
                 dayNightFolder.close();
                 bloomFolder.close();
                 tonemapFolder.close();
@@ -905,12 +924,26 @@
 
                 // Initialize
                 app.add_demo_shapes();
-                app.add_floor(0.0, 100.0, 0.3, 0.3, 0.3, 0.0, 0.7);
+                // Create terrain grid: 5x5 tiles, 100 units each, mountains on outer ring
+                app.add_terrain_grid(
+                    5,      // grid_size: 5x5 grid
+                    100,    // tile_size: each tile is 100 units
+                    0,      // y: base height at 0
+                    60,     // mountain_height: rolling hills up to 60 units
+                    32      // resolution: 32x32 vertices per mountain tile
+                );
 
                 // Apply all saved settings to the app
                 function applyAllSettings() {
                     // Render
                     app.set_render_mode(settings.renderMode);
+                    // Camera
+                    app.set_camera_fov(settings.cameraFov);
+                    app.set_camera_near(settings.cameraNear);
+                    app.set_camera_far(settings.cameraFar);
+                    app.set_camera_move_speed(settings.cameraMoveSpeed);
+                    app.set_camera_rotate_sensitivity(settings.cameraRotateSensitivity);
+                    app.set_camera_zoom_speed(settings.cameraZoomSpeed);
                     // Bloom
                     app.set_bloom_enabled(settings.bloomEnabled);
                     app.set_bloom_intensity(settings.bloomIntensity);
@@ -982,6 +1015,7 @@
                     app.set_dof_quality(settings.dofQuality);
                     app.set_dof_focal_distance(settings.dofFocalDistance);
                     app.set_dof_focal_range(settings.dofFocalRange);
+                    app.set_dof_aperture(settings.dofAperture);
                     app.set_dof_blur_strength(settings.dofBlurStrength);
                     if (app.set_dof_highlight_boost) app.set_dof_highlight_boost(settings.dofHighlightBoost);
                     if (app.set_dof_highlight_threshold) app.set_dof_highlight_threshold(settings.dofHighlightThreshold);

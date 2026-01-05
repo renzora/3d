@@ -62,7 +62,9 @@ impl GltfLoader {
             }
         }
 
-        // Load embedded textures
+        // Load embedded textures with size limiting to avoid memory issues
+        const MAX_TEXTURE_SIZE: u32 = 2048;
+
         for texture in gltf.textures() {
             if let gltf::image::Source::View { view, mime_type: _ } = texture.source().source() {
                 let start = view.offset();
@@ -72,8 +74,19 @@ impl GltfLoader {
                         let image_bytes = &buffer_data[start..end];
                         // Decode the image using the image crate
                         if let Ok(img) = image::load_from_memory(image_bytes) {
-                            let rgba = img.to_rgba8();
-                            let (width, height) = (rgba.width(), rgba.height());
+                            let (orig_width, orig_height) = (img.width(), img.height());
+
+                            // Resize if too large to avoid memory issues
+                            let (rgba, width, height) = if orig_width > MAX_TEXTURE_SIZE || orig_height > MAX_TEXTURE_SIZE {
+                                let scale = MAX_TEXTURE_SIZE as f32 / orig_width.max(orig_height) as f32;
+                                let new_width = ((orig_width as f32 * scale) as u32).max(1);
+                                let new_height = ((orig_height as f32 * scale) as u32).max(1);
+                                let resized = img.resize(new_width, new_height, image::imageops::FilterType::Triangle);
+                                (resized.to_rgba8(), new_width, new_height)
+                            } else {
+                                (img.to_rgba8(), orig_width, orig_height)
+                            };
+
                             let data = rgba.into_raw();
                             let name = format!("texture_{}", texture.index());
                             scene.textures.insert(name, LoadedTexture::new(width, height, data));

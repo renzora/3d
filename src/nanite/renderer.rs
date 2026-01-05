@@ -613,6 +613,7 @@ impl NaniteRenderer {
     /// Upload materials and create texture array.
     /// Note: After calling this, you must call set_texture_bind_group with a bind group
     /// that includes the materials, textures, AND shadow resources.
+    /// The fallback checkerboard texture is always at index 0.
     pub fn upload_materials_and_textures(
         &mut self,
         device: &wgpu::Device,
@@ -623,65 +624,66 @@ impl NaniteRenderer {
         // Upload materials
         self.resources.upload_materials(queue, materials);
 
-        // Create texture array (resize all to 2048x2048 for quality)
-        if !textures.is_empty() {
-            self.resources.create_texture_array(device, queue, textures, 2048);
-        } else {
-            // Create fallback checkerboard texture array (Unreal-style)
-            self.create_fallback_texture_array(device, queue);
+        // Generate fallback checkerboard texture (always index 0)
+        let fallback_pixels = self.generate_fallback_texture_pixels();
+        let fallback_size = 256u32;
+
+        // Build texture list with fallback first, then provided textures
+        let mut all_textures: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        all_textures.push((fallback_size, fallback_size, fallback_pixels));
+
+        // Add provided textures (will be at indices 1, 2, 3...)
+        for (w, h, data) in textures {
+            all_textures.push((*w, *h, data.to_vec()));
         }
+
+        // Create texture array with fallback + provided textures
+        let texture_refs: Vec<(u32, u32, &[u8])> = all_textures
+            .iter()
+            .map(|(w, h, d)| (*w, *h, d.as_slice()))
+            .collect();
+
+        self.resources.create_texture_array(device, queue, &texture_refs, 2048);
     }
 
-    /// Create a fallback checkerboard texture array (Unreal-style beveled tile pattern).
-    fn create_fallback_texture_array(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.resources.texture_array_view().is_some() {
-            return;
-        }
-
-        // Create Unreal-style beveled floor tile pattern with rounded corners
-        // 2x2 grid of tiles, each tile is one checker with rounded beveled edges
+    /// Generate the fallback checkerboard texture pixels.
+    fn generate_fallback_texture_pixels(&self) -> Vec<u8> {
         let size = 256u32;
-        let tile_size = size / 2;    // 2x2 tiles
-        let grout_width = 3u32;      // Dark gap between tiles
-        let bevel_width = 6u32;      // Beveled/rounded edge
-        let corner_radius = 12u32;   // Rounded corner radius
+        let tile_size = size / 2;
+        let grout_width = 3u32;
+        let bevel_width = 6u32;
+        let corner_radius = 12u32;
 
         let mut pixels = vec![0u8; (size * size * 4) as usize];
 
-        // Warm tan/beige colors like Unreal's floor
-        let grout = [90u8, 85, 80, 255];           // Dark grout/gap
-        let tile_light = [210u8, 200, 185, 255];  // Light tan tile
-        let tile_dark = [180u8, 170, 155, 255];   // Dark tan tile
+        let grout = [90u8, 85, 80, 255];
+        let tile_light = [210u8, 200, 185, 255];
+        let tile_dark = [180u8, 170, 155, 255];
 
-        // Simple hash-based noise function
         let noise = |x: u32, y: u32| -> f32 {
             let n = x.wrapping_mul(374761393).wrapping_add(y.wrapping_mul(668265263));
             let n = (n ^ (n >> 13)).wrapping_mul(1274126177);
             let n = n ^ (n >> 16);
-            (n as f32 / u32::MAX as f32) * 2.0 - 1.0 // Returns -1.0 to 1.0
+            (n as f32 / u32::MAX as f32) * 2.0 - 1.0
         };
-        let noise_strength = 8.0f32; // Subtle noise amount
+        let noise_strength = 8.0f32;
 
         for y in 0..size {
             for x in 0..size {
                 let idx = ((y * size + x) * 4) as usize;
 
-                // Which tile are we in (0 or 1 in each axis)
                 let tile_x = x / tile_size;
                 let tile_y = y / tile_size;
                 let is_light_tile = (tile_x + tile_y) % 2 == 0;
 
-                // Position within the tile
                 let local_x = x % tile_size;
                 let local_y = y % tile_size;
 
-                // Distance from tile edges
                 let dist_left = local_x;
                 let dist_right = tile_size - 1 - local_x;
                 let dist_top = local_y;
                 let dist_bottom = tile_size - 1 - local_y;
 
-                // Calculate distance from edge with rounded corners (floating point for smooth AA)
                 let corner_r = corner_radius as f32;
                 let dl = dist_left as f32;
                 let dr = dist_right as f32;
@@ -712,14 +714,12 @@ impl NaniteRenderer {
                     dl.min(dr).min(dt).min(db)
                 };
 
-                // Base tile color
                 let base_color = if is_light_tile { &tile_light } else { &tile_dark };
 
                 let grout_w = grout_width as f32;
                 let bevel_w = bevel_width as f32;
-                let aa_width = 1.5f32; // Anti-aliasing width in pixels
+                let aa_width = 1.5f32;
 
-                // Smooth blending helper
                 let smoothstep = |edge0: f32, edge1: f32, x: f32| -> f32 {
                     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
                     t * t * (3.0 - 2.0 * t)
@@ -734,12 +734,10 @@ impl NaniteRenderer {
                     ]
                 };
 
-                // Determine which edges we're near for bevel lighting
                 let near_top = dt < db;
                 let near_left = dl < dr;
                 let light_adjust = if near_top || near_left { 20.0 } else { -25.0 };
 
-                // Calculate beveled tile color at current position
                 let bevel_factor = ((dist_edge - grout_w) / bevel_w).clamp(0.0, 1.0);
                 let adjust = light_adjust * (1.0 - bevel_factor);
                 let bevel_color: [u8; 4] = [
@@ -750,21 +748,16 @@ impl NaniteRenderer {
                 ];
 
                 let color: [u8; 4] = if dist_edge < grout_w - aa_width {
-                    // Pure grout
                     grout
                 } else if dist_edge < grout_w + aa_width {
-                    // Smooth transition from grout to bevel
                     let t = smoothstep(grout_w - aa_width, grout_w + aa_width, dist_edge);
                     lerp_color(&grout, &bevel_color, t)
                 } else if dist_edge < grout_w + bevel_w {
-                    // Bevel region (already smooth via bevel_factor)
                     bevel_color
                 } else {
-                    // Tile interior
                     *base_color
                 };
 
-                // Apply subtle noise to the color
                 let n = noise(x, y) * noise_strength;
                 let final_color = [
                     (color[0] as f32 + n).clamp(0.0, 255.0) as u8,
@@ -776,6 +769,19 @@ impl NaniteRenderer {
                 pixels[idx..idx + 4].copy_from_slice(&final_color);
             }
         }
+
+        pixels
+    }
+
+    /// Create a fallback checkerboard texture array (Unreal-style beveled tile pattern).
+    /// This is used when no textures are provided during initialization.
+    fn create_fallback_texture_array(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.resources.texture_array_view().is_some() {
+            return;
+        }
+
+        let pixels = self.generate_fallback_texture_pixels();
+        let size = 256u32;
 
         let fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Nanite Floor Tile Texture"),
@@ -877,17 +883,13 @@ impl NaniteRenderer {
         render_pass.set_bind_group(1, &self.resources.geometry_bind_group, &[]);
         render_pass.set_bind_group(2, &self.resources.visibility_bind_group, &[]);
 
-        if self.culling_enabled {
-            // Use indirect draw with GPU-culled results
-            render_pass.draw_indirect(&self.resources.indirect_buffer, 0);
-        } else {
-            // Fallback: render all clusters directly
-            let total_triangles: u32 = self.meshes.iter().map(|m| {
-                m.cluster_count * self.config.triangles_per_cluster
-            }).sum();
+        // Use instanced rendering: each instance = one cluster
+        // vertex_index = vertex within cluster (0 to MAX_TRIANGLES * 3)
+        // instance_index = cluster index
+        let vertices_per_cluster = self.config.triangles_per_cluster * 3;
+        let cluster_count = self.resources.cluster_count;
 
-            render_pass.draw(0..total_triangles * 3, 0..1);
-        }
+        render_pass.draw(0..vertices_per_cluster, 0..cluster_count);
     }
 
     /// Set texture bind group (includes materials, textures, and shadows).
