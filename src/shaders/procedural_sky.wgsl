@@ -24,7 +24,7 @@ var<uniform> uniforms: Uniforms;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) ray_dir: vec3<f32>,
+    @location(0) ndc: vec2<f32>,
 }
 
 // Generate full-screen triangle
@@ -36,13 +36,23 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let x = f32(i32(vertex_index & 1u) * 4 - 1);
     let y = f32(i32(vertex_index >> 1u) * 4 - 1);
     out.position = vec4<f32>(x, y, 1.0, 1.0);
-
-    // Calculate world-space ray direction
-    let clip_pos = vec4<f32>(x, y, 1.0, 1.0);
-    let world_pos = uniforms.inv_view_proj * clip_pos;
-    out.ray_dir = normalize(world_pos.xyz / world_pos.w);
+    out.ndc = vec2<f32>(x, y);
 
     return out;
+}
+
+// Compute ray direction in fragment shader to avoid interpolation issues
+fn get_ray_direction(ndc: vec2<f32>) -> vec3<f32> {
+    let clip_near = vec4<f32>(ndc.x, ndc.y, 0.0, 1.0);
+    let clip_far = vec4<f32>(ndc.x, ndc.y, 1.0, 1.0);
+
+    let world_near = uniforms.inv_view_proj * clip_near;
+    let world_far = uniforms.inv_view_proj * clip_far;
+
+    let near_pos = world_near.xyz / world_near.w;
+    let far_pos = world_far.xyz / world_far.w;
+
+    return normalize(far_pos - near_pos);
 }
 
 const PI: f32 = 3.14159265359;
@@ -560,7 +570,7 @@ fn moon(ray_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let ray_dir = normalize(in.ray_dir);
+    let ray_dir = get_ray_direction(in.ndc);
     let sun_dir = normalize(uniforms.sun_direction);
 
     // Camera is slightly above ground (1.7m = human eye height, scaled)
@@ -569,25 +579,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var color: vec3<f32>;
 
-    // Below horizon - ground rendering
-    if (ray_dir.y < 0.0) {
-        // Get sky color at horizon for blending
-        let horizon_result = compute_atmosphere(
-            ray_origin,
-            vec3<f32>(ray_dir.x, 0.01, ray_dir.z),
-            sun_dir,
-            16,
-            4
-        );
+    // Check if ray intersects ground (like Unreal's IntersectGround)
+    let planet_center = vec3<f32>(0.0, -PLANET_RADIUS, 0.0);
+    let ground_intersection = ray_sphere_intersect(ray_origin, ray_dir, planet_center, PLANET_RADIUS);
+    let hits_ground = ground_intersection.x > 0.0;
+
+    // Below horizon - ground rendering (Unreal-style with ground albedo)
+    if (hits_ground || ray_dir.y < 0.0) {
+        // Compute atmospheric scattering towards the horizon
+        // Use a ray just above horizon to get the sky color at horizon
+        let horizon_dir = normalize(vec3<f32>(ray_dir.x, 0.001, ray_dir.z));
+        let horizon_result = compute_atmosphere(ray_origin, horizon_dir, sun_dir, 16, 4);
         let horizon_sky = horizon_result.inscattering * uniforms.sun_intensity;
 
-        // Ground with ambient based on sun position
-        let ground_ambient = max(0.15, sun_dir.y * 0.4 + 0.5);
-        let ground = uniforms.ground_color * ground_ambient;
+        // Ground albedo illuminated by sun (like Unreal's GroundAlbedo)
+        // The ground receives light from the sun, attenuated by atmosphere
+        let ground_normal = vec3<f32>(0.0, 1.0, 0.0);  // Flat ground pointing up
+        let ndot_sun = max(0.0, dot(ground_normal, sun_dir));
 
-        // Smooth blend from ground to horizon sky
-        let horizon_blend = smoothstep(-0.15, 0.0, ray_dir.y);
+        // Compute transmittance from sun to ground (how much sunlight reaches ground)
+        let sun_transmittance = exp(-get_rayleigh_scattering() * 2.0 * max(0.0, 1.0 - sun_dir.y));
+
+        // Ground color = albedo * (direct sun + ambient sky)
+        let direct_light = ndot_sun * sun_transmittance * uniforms.sun_intensity * 0.3;
+        let ambient_light = (horizon_sky.r + horizon_sky.g + horizon_sky.b) / 3.0 * 0.5;
+        let ground_illumination = direct_light + ambient_light + 0.02; // Small minimum ambient
+        let ground = uniforms.ground_color * ground_illumination;
+
+        // Atmospheric fog between camera and ground (aerial perspective)
+        // The further down we look, the more atmosphere we see
+        let depth_factor = saturate(-ray_dir.y * 10.0);  // How far "down" we're looking
+        let fog_density = depth_factor * 0.7;
+
+        // Blend ground with horizon sky based on viewing angle (aerial perspective)
+        // Looking straight down = more ground visible, looking at horizon = more sky/fog
+        let horizon_blend = smoothstep(-0.3, 0.0, ray_dir.y);
         color = mix(ground, horizon_sky, horizon_blend);
+
+        // Add atmospheric haze (Unreal's aerial perspective for ground)
+        color = mix(color, horizon_sky * 0.8, fog_density * (1.0 - horizon_blend));
     } else {
         // Main atmospheric scattering (reduced samples for performance)
         // Use 32 samples for main ray, 8 for light rays

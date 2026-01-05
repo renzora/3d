@@ -43,7 +43,7 @@ impl Default for ProceduralSkySettings {
             turbidity: 2.0,
             sun_disk_size: 1.0,
             sun_disk_intensity: 100.0,
-            ground_color: [0.37, 0.35, 0.33],
+            ground_color: [0.25, 0.2, 0.15],
             exposure: 1.0,
             cloud_speed: 0.02,
         }
